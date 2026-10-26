@@ -1,7 +1,7 @@
 /* 오프라인에서도 열리도록 앱 파일을 보관한다.
    같은 주소의 파일은 "네트워크 먼저, 안 되면 보관본" 이라서, 새로 올린 버전이 바로 반영된다. */
 const V = 'my-tools-v1';
-const CORE = ['./', 'index.html', 'backend.js', 'firebase-config.js', 'routine.html', 'bible.html', 'reading.html', 'planner.html', 'opic.html', 'budget.html', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
+const CORE = ['./', 'index.html', 'backend.js', 'firebase-config.js', 'routine.html', 'bible.html', 'reading.html', 'planner.html', 'opic.html', 'budget.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(V).then((c) => c.addAll(CORE)).then(() => self.skipWaiting()));

@@ -1,0 +1,1060 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>오늘의 루틴</title>
+<script>
+/* 허브 안에서 열렸을 때: 허브(부모 화면)에게 메시지로 부탁해서 계정 저장소를 쓰고, 다른 영역의 도구로 이동한다.
+   (My Tools Hub의 다른 도구들과 같은 방식) */
+(function () {
+  if (window.parent === window) return;
+  document.documentElement.classList.add('emb');
+  var P = window.parent, seq = 0, pending = {}, subs = {};
+  function post(m) { m.__hub = 1; P.postMessage(m, '*'); }
+  function call(cap, op, args) {
+    return new Promise(function (res, rej) {
+      var id = ++seq; pending[id] = { res: res, rej: rej };
+      post({ id: id, cap: cap, op: op, args: args || [] });
+    });
+  }
+  function docSnap(d) {
+    var body = d.data;
+    return { id: d.id, exists: !!d.exists, metadata: d.metadata || {},
+      data: function () { return body == null ? undefined : JSON.parse(JSON.stringify(body)); } };
+  }
+  function wrap(s) {
+    if (!s) return s;
+    if (s.kind === 'doc') return docSnap(s);
+    var docs = (s.docs || []).map(docSnap);
+    return { docs: docs, size: docs.length, empty: !docs.length, metadata: s.metadata || {}, docChanges: function () { return []; } };
+  }
+  window.addEventListener('message', function (e) {
+    if (e.source !== P) return;
+    var m = e.data; if (!m || !m.__hubr) return;
+    if (m.sub) { var s = subs[m.sub]; if (!s) return; if (m.err) { if (s.err) s.err(m.err); } else s.next(wrap(m.snap)); return; }
+    var p = pending[m.id]; if (!p) return; delete pending[m.id];
+    if (m.err) p.rej(m.err); else p.res(m.val);
+  });
+  function subscribe(kind, path, lim, next, err) {
+    var id = ++seq; subs[id] = { next: next, err: err };
+    post({ sub: id, kind: kind, path: path, lim: lim || null });
+    return function () { delete subs[id]; post({ unsub: id }); };
+  }
+  function docRef(path) {
+    return {
+      id: path.split('/').pop(), path: path,
+      get: function () { return call('db', 'docGet', [path]).then(wrap); },
+      set: function (d) { return call('db', 'docSet', [path, d]); },
+      update: function (d) { return call('db', 'docUpdate', [path, d]); },
+      'delete': function () { return call('db', 'docDel', [path]); },
+      collection: function (sub) { return colRef(path + '/' + sub); },
+      onSnapshot: function (next, err) { return subscribe('doc', path, null, next, err); }
+    };
+  }
+  function colRef(path, lim) {
+    return {
+      path: path,
+      doc: function (id) { return docRef(path + '/' + (id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 8)))); },
+      limit: function (n) { return colRef(path, n); },
+      get: function () { return call('db', 'colGet', [path, lim || null]).then(wrap); },
+      onSnapshot: function (next, err) { return subscribe('col', path, lim, next, err); }
+    };
+  }
+  var capsP = null;
+  function caps() {
+    if (!capsP) capsP = new Promise(function (res) {
+      var done = false;
+      call('hub', 'caps', []).then(function (c) { done = true; res(c || {}); }, function () { done = true; res({}); });
+      setTimeout(function () { if (!done) res({}); }, 12000);
+    });
+    return capsP;
+  }
+  var api = {
+    use: function (name) {
+      return caps().then(function (c) {
+        if (!c[name]) return null;
+        if (name === 'db') return { doc: docRef, collection: function (p) { return colRef(p); } };
+        if (name === 'user') return {
+          id: function () { return call('user', 'id', []); },
+          isOwner: function () { return false; }, canEdit: function () { return false; }, can: function () { return null; }
+        };
+        if (name === 'downloads') return { save: function (r) { return call('downloads', 'save', [{ filename: r.filename, data: r.data }]); } };
+        return null;
+      });
+    }
+  };
+  window.__hubClaude = api;
+  window.__hubNav = function (key) { post({ nav: key }); };
+  window.__hubTools = function () { return call('hub', 'tools', []); };
+  // 도구가 "오늘 이만큼 했다"는 수치를 알려 주면 허브가 계정에 남기고, 루틴이 그 수치로 자동 체크한다
+  window.__hubReport = function (r) { post({ report: r }); };
+})();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap">
+<style>
+/* Layout: 오늘 체크리스트와 허브(건강·타이머·기록 모듈)를 나란히 두는 하루 대시보드. 좁은 화면에서는 하단 탭으로 나뉜다. */
+:root {
+  --bg: #eef2ee;
+  --surface: #fbfcfa;
+  --surface2: #e3e9e2;
+  --line: #d2dad1;
+  --edge: #94a39a;
+  --ink: #14201a;
+  --ink2: #52625a;
+  --accent: #2750e8;
+  --accent-ink: #ffffff;
+  --accent-soft: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  --warn: #9a5200;
+  --warn-soft: #fbebd2;
+  --ok: #1b7f4b;
+  --scrim: rgba(10, 16, 13, .45);
+  --font-body: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1411; --surface: #161f1a; --surface2: #1f2b25; --line: #2a372f; --edge: #5b6c62;
+    --ink: #e7eee9; --ink2: #98aa9f; --accent: #8ea4ff; --accent-ink: #0b1020;
+    --warn: #f0b35c; --warn-soft: #3a2b10; --ok: #6fd39b; --scrim: rgba(0, 0, 0, .6);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1411; --surface: #161f1a; --surface2: #1f2b25; --line: #2a372f; --edge: #5b6c62;
+  --ink: #e7eee9; --ink2: #98aa9f; --accent: #8ea4ff; --accent-ink: #0b1020;
+  --warn: #f0b35c; --warn-soft: #3a2b10; --ok: #6fd39b; --scrim: rgba(0, 0, 0, .6);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  margin: 0;
+  background: var(--bg); color: var(--ink);
+  font-family: var(--font-body); font-size: 15px; line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 0;
+  -webkit-text-size-adjust: 100%;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+svg { display: block; }
+.ico { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+.app { max-width: 1040px; margin: 0 auto; padding-bottom: 110px; }
+
+/* header */
+.top { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; margin-bottom: 16px; }
+.top-l { min-width: 0; }
+.brand { font-size: 12px; font-weight: 600; letter-spacing: .1em; color: var(--ink2); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.sync { font-weight: 500; letter-spacing: 0; padding: 1px 8px; border-radius: 99px; background: var(--surface2); }
+.sync[data-s="ok"] { color: var(--ok); }
+.sync[data-s="err"] { color: var(--warn); }
+h1.date { margin: 2px 0 0; font-size: 26px; line-height: 1.25; font-weight: 700; letter-spacing: -.01em; text-wrap: balance; }
+.date small { font-size: 15px; font-weight: 500; color: var(--ink2); margin-left: 6px; }
+.daynav { display: flex; gap: 6px; align-items: center; }
+
+/* nav: bottom bar on phones, top tabs on wide screens */
+.nav {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  background: var(--surface); border-top: 1px solid var(--line);
+  padding: 6px max(8px, env(safe-area-inset-right, 0px)) calc(6px + env(safe-area-inset-bottom, 0px)) max(8px, env(safe-area-inset-left, 0px));
+}
+.nav button { background: none; border: 0; border-radius: 10px; min-height: 52px; display: flex; flex-direction: column; gap: 2px; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: var(--ink2); }
+.nav button[aria-current="page"] { color: var(--accent); background: var(--accent-soft); }
+
+/* controls */
+.btn { min-height: 40px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); font-weight: 600; font-size: 14px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
+.btn:hover { border-color: var(--edge); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.sm { min-height: 36px; padding: 0 12px; }
+.btn.icon { width: 40px; padding: 0; }
+.btn.danger { color: var(--warn); }
+.btn[disabled] { opacity: .4; cursor: default; }
+.btn .ico { width: 18px; height: 18px; }
+.linkbtn { background: none; border: 0; padding: 0; color: var(--accent); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+
+/* panes */
+.pane { display: none; }
+.app[data-tab="today"] #pane-today, .app[data-tab="hub"] #pane-hub,
+.app[data-tab="stats"] #pane-stats, .app[data-tab="manage"] #pane-manage { display: block; }
+.pane > * + * { margin-top: 14px; }
+.sec-h { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 22px 0 8px; }
+.sec-h h2 { margin: 0; font-size: 12px; letter-spacing: .1em; font-weight: 600; color: var(--ink2); }
+.sec-h span { font-size: 12px; color: var(--ink2); }
+.pane > .sec-h:first-child { margin-top: 0; }
+
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+.bar { height: 8px; border-radius: 99px; background: var(--surface2); overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); border-radius: 99px; min-width: 0; transition: width .25s; }
+.bar.ok i { background: var(--ok); }
+
+/* today: summary */
+.sum { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 16px; align-items: center; }
+.sum-n { font-size: 44px; line-height: 1; font-weight: 600; }
+.sum-n .of { font-size: 20px; color: var(--ink2); }
+.sum-t { display: flex; flex-direction: column; min-width: 0; }
+.sum-t b { font-size: 16px; }
+.sum-t span { color: var(--ink2); font-size: 13px; }
+.streak { text-align: right; font-size: 13px; color: var(--ink2); }
+.streak .mono { display: block; font-size: 22px; font-weight: 600; color: var(--ink); line-height: 1.1; }
+.sum .bar { grid-column: 1 / -1; margin-top: 10px; }
+
+.notice { background: var(--warn-soft); color: var(--warn); border-radius: 12px; padding: 12px 14px; display: flex; gap: 10px 14px; align-items: center; justify-content: space-between; flex-wrap: wrap; font-size: 14px; }
+.notice b { font-weight: 600; }
+.notice .acts { display: flex; gap: 8px; }
+.notice .btn { background: transparent; border-color: currentColor; color: inherit; min-height: 34px; }
+.notice.info { background: var(--accent-soft); color: var(--ink); }
+
+/* routine list */
+.list { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+.row { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 11px 14px; min-height: 62px; }
+.row + .row { border-top: 1px solid var(--line); }
+.row.done .nm { color: var(--ink2); text-decoration: line-through; text-decoration-color: var(--edge); }
+.nm { font-weight: 600; overflow-wrap: anywhere; }
+.meta { font-size: 12.5px; color: var(--ink2); display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: center; }
+.meta .time { font-family: var(--font-mono); }
+.meta .late { color: var(--warn); font-weight: 600; }
+.meta .hub { padding: 0 7px; border-radius: 99px; background: var(--accent-soft); color: var(--ink); font-size: 12px; }
+.row .mini { grid-column: 2 / 3; }
+.tick { width: 32px; height: 32px; border-radius: 50%; border: 2px solid var(--edge); background: var(--surface); padding: 0; display: grid; place-items: center; color: var(--accent-ink); position: relative; }
+.tick .ico { width: 18px; height: 18px; stroke-width: 2.6; }
+.tick.done { background: var(--accent); border-color: var(--accent); }
+.tick.ring { border: 0; background: conic-gradient(var(--accent) var(--p), var(--surface2) 0); }
+.tick.ring::before { content: ""; position: absolute; inset: 4px; border-radius: 50%; background: var(--surface); }
+.tick.ring.done { background: var(--accent); }
+.tick.ring.done::before { display: none; }
+.tick.ring > * { position: relative; }
+.pbar { margin-top: 6px; height: 4px; }
+.empty { padding: 28px 18px; text-align: center; color: var(--ink2); }
+.empty b { display: block; color: var(--ink); font-size: 16px; margin-bottom: 4px; }
+.empty .btn { margin-top: 12px; }
+
+/* hub */
+.hub-intro { color: var(--ink2); font-size: 13.5px; margin: 0; }
+.mods { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
+.mod.wide { grid-column: 1 / -1; }
+.mod { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.mod-h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.label { font-size: 12px; letter-spacing: .1em; font-weight: 600; color: var(--ink2); }
+.tag { font-size: 12px; color: var(--ink2); }
+.big { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.big .mono { font-size: 34px; line-height: 1.1; font-weight: 600; }
+.big .of { color: var(--ink2); font-size: 14px; }
+.ctl { display: flex; gap: 8px; align-items: center; }
+.ctl input { flex: 1; min-width: 0; text-align: center; font-family: var(--font-mono); font-weight: 600; }
+input[type="number"], input[type="text"], input[type="time"], select, textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; min-height: 40px; padding: 0 12px; width: 100%; }
+textarea { padding: 10px 12px; resize: vertical; min-height: 92px; line-height: 1.5; }
+.links { font-size: 12.5px; color: var(--ink2); overflow-wrap: anywhere; }
+.timer-t { font-size: 52px; line-height: 1; font-weight: 600; letter-spacing: -.02em; }
+.presets { display: flex; gap: 6px; flex-wrap: wrap; }
+.pill { min-height: 34px; padding: 0 12px; border-radius: 99px; border: 1px solid var(--line); background: var(--surface); font-weight: 600; font-size: 13px; }
+.pill[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); }
+.pill[disabled] { opacity: .45; }
+.btns { display: flex; gap: 8px; flex-wrap: wrap; }
+.moods { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.moods button { min-height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); font-size: 13px; font-weight: 600; padding: 0 2px; }
+.moods button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.help { font-size: 13px; color: var(--ink2); margin: 0; }
+pre.code { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--bg); font-family: var(--font-mono); font-size: 12.5px; overflow-x: auto; }
+.check { display: flex; align-items: center; gap: 10px; min-height: 36px; }
+.check input { width: 20px; height: 20px; accent-color: var(--accent); }
+.msg { font-size: 13px; min-height: 18px; margin: 0; }
+.msg.err { color: var(--warn); }
+.msg.ok { color: var(--ok); }
+.file { font-size: 13px; }
+
+/* stats */
+.kpis { display: grid; grid-template-columns: repeat(3, 1fr); }
+.kpi { padding: 0 8px; text-align: center; }
+.kpi + .kpi { border-left: 1px solid var(--line); }
+.kpi .mono { font-size: 30px; font-weight: 600; line-height: 1.1; display: block; color: var(--ink); }
+.kpi span { font-size: 12.5px; color: var(--ink2); }
+.chart { width: 100%; height: auto; max-height: 260px; }
+.chart text { fill: var(--ink2); font-family: var(--font-mono); font-size: 9px; }
+.chart .gl { stroke: var(--line); stroke-width: 1; }
+.chart .b { fill: color-mix(in srgb, var(--accent) 38%, var(--surface2)); }
+.chart .b.t { fill: var(--accent); }
+.chart .v { fill: var(--ink); font-weight: 600; }
+.chart .none { fill: var(--surface2); }
+.heat-wrap { display: flex; gap: 8px; align-items: flex-start; }
+.heat-l { display: grid; grid-template-rows: repeat(7, 34px); gap: 5px; font-size: 11px; color: var(--ink2); align-items: center; }
+.heat { display: grid; grid-template-rows: repeat(7, 34px); grid-template-columns: repeat(5, 34px); grid-auto-flow: column; gap: 5px; }
+.heat i { border-radius: 6px; background: var(--surface2); border: 1px solid transparent; }
+.heat i.n { background: transparent; border: 1px dashed var(--line); }
+.heat i.f { visibility: hidden; }
+.heat i.t { outline: 2px solid var(--ink); outline-offset: 1px; }
+.legend { font-size: 12px; color: var(--ink2); display: flex; align-items: center; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+.legend i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; }
+.rt { display: grid; grid-template-columns: minmax(0, 1fr) 90px 54px; gap: 4px 12px; align-items: center; padding: 10px 14px; }
+.rt + .rt { border-top: 1px solid var(--line); }
+.rt .nm { font-weight: 500; font-size: 14px; }
+.rt .mono { font-size: 13px; text-align: right; }
+.rt .sub { grid-column: 1 / -1; font-size: 12px; color: var(--ink2); }
+
+/* manage */
+.mrow { width: 100%; text-align: left; background: none; border: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 14px; min-height: 62px; }
+.mrow + .mrow { border-top: 1px solid var(--line); }
+.mrow:hover { background: var(--accent-soft); }
+.mrow.paused .nm { color: var(--ink2); }
+.badge { font-size: 12px; padding: 1px 8px; border-radius: 99px; background: var(--surface2); color: var(--ink2); }
+
+/* sheet */
+.scrim { position: fixed; inset: 0; z-index: 40; background: var(--scrim); display: flex; align-items: flex-end; justify-content: center; }
+.sheet { background: var(--surface); width: 100%; max-width: 520px; max-height: 92%; overflow-y: auto; border-radius: 18px 18px 0 0; padding: 20px max(16px, env(safe-area-inset-left, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)); display: flex; flex-direction: column; gap: 14px; }
+.sheet h2 { margin: 0; font-size: 18px; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field > label, .field > .lb { font-size: 13px; font-weight: 600; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.days { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { position: relative; }
+.chip input { position: absolute; opacity: 0; inset: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+.chip span { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 50%; border: 1px solid var(--line); font-weight: 600; font-size: 14px; background: var(--bg); }
+.chip input:checked + span { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.chip input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sheet-f { display: flex; gap: 8px; flex-wrap: wrap; }
+.sheet-f .sp { flex: 1; }
+
+.toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(84px + env(safe-area-inset-bottom, 0px)); background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 99px; font-size: 14px; font-weight: 500; z-index: 60; max-width: calc(100% - 32px); text-align: center; }
+
+/* 허브 안에 들어갔을 때: 하단 탭은 허브가 갖고 있으므로 이 화면의 탭은 위쪽에 둔다 */
+html.emb .nav { position: static; display: flex; gap: 4px; background: none; border: 0; padding: 0; }
+html.emb .nav button { flex-direction: row; gap: 8px; min-height: 40px; padding: 0 12px; font-size: 14px; }
+html.emb .nav button { white-space: nowrap; }
+@media (max-width: 560px) {
+  html.emb .nav { display: grid; grid-template-columns: repeat(4, 1fr); width: 100%; gap: 4px; }
+  html.emb .nav button { flex-direction: column; gap: 2px; padding: 0 2px; min-height: 52px; font-size: 12px; }
+}
+html.emb .app { padding-bottom: 48px; }
+html.emb .toast { bottom: 28px; }
+html.emb .scrim { align-items: center; }
+html.emb .sheet { border-radius: 18px; }
+.acts { display: flex; gap: 6px; align-items: center; }
+.hub-note { font-size: 12.5px; color: var(--ink2); margin: 0; }
+
+@media (min-width: 900px) {
+  body { padding-top: 32px; }
+  .app { padding-bottom: 48px; }
+  .nav { position: static; display: flex; gap: 4px; background: none; border: 0; padding: 0; }
+  .nav button { flex-direction: row; gap: 8px; min-height: 40px; padding: 0 14px; font-size: 14px; }
+  .nav [data-tab="hub"] { display: none; }
+  .nav button .lbl-w { display: inline; }
+  .scrim { align-items: center; }
+  .sheet { border-radius: 18px; }
+  .toast { bottom: 28px; }
+  .app[data-tab="today"] .panes { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+  .app[data-tab="today"] #pane-hub { display: block; }
+  .top { align-items: center; }
+}
+@media (max-width: 899px) { .nav .lbl-w { display: none; } }
+@media (max-width: 420px) {
+  h1.date { font-size: 22px; }
+  .sum-n { font-size: 38px; }
+  .timer-t { font-size: 44px; }
+  .heat, .heat-l { --cell: 30px; }
+}
+@media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
+</style>
+</head>
+<body>
+<div class="app" id="app" data-tab="today" data-wide="false">
+  <header class="top">
+    <div class="top-l">
+      <div class="brand"><span>루틴</span><span class="sync" id="sync" data-s="local">이 기기에 저장</span></div>
+      <h1 class="date" id="dateH"></h1>
+    </div>
+    <div class="daynav" id="daynav"></div>
+    <nav class="nav" id="nav" aria-label="화면 이동"></nav>
+  </header>
+  <div class="panes">
+    <section class="pane" id="pane-today" aria-label="오늘 루틴"></section>
+    <section class="pane" id="pane-hub" aria-label="허브"></section>
+    <section class="pane" id="pane-stats" aria-label="기록"></section>
+    <section class="pane" id="pane-manage" aria-label="루틴 관리"></section>
+  </div>
+</div>
+<div class="scrim" id="scrim" hidden><div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title"></div></div>
+<div class="toast" id="toast" role="status" hidden></div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ---------- constants ---------- */
+  var KEY = 'routine-hub-v1';
+  var DOW = ['일', '월', '화', '수', '목', '금', '토'];
+  var METRICS = {
+    water:   { label: '물',   unit: '잔',   goal: 8,    step: 1,    quick: 1,    stepLbl: '1' },
+    steps:   { label: '걸음', unit: '보',   goal: 8000, step: 1000, quick: 1000, stepLbl: '1,000' },
+    sleep:   { label: '수면', unit: '시간', goal: 7,    step: 0.5,  quick: 0,    stepLbl: '0.5' },
+    workout: { label: '운동', unit: '분',   goal: 30,   step: 10,   quick: 10,   stepLbl: '10' },
+    focus:   { label: '집중', unit: '분',   goal: 25,   step: 5,    quick: 0,    stepLbl: '5' },
+    tool:    { label: '영역 도구', unit: '회', goal: 1, step: 1, quick: 0, stepLbl: '1' }
+  };
+  var LINK_NAMES = { none: '직접 체크', water: '물 (잔)', steps: '걸음 수', sleep: '수면 시간', workout: '운동 시간', focus: '집중 타이머', tool: '영역 도구에 기록 (자동 체크)', note: '오늘의 기록 (일기)' };
+  var HUB_TAG = { water: '물', steps: '걸음', sleep: '수면', workout: '운동', focus: '집중 타이머', tool: '영역', note: '기록' };
+  var ALIAS = { steps: 'steps', step: 'steps', '걸음': 'steps', '걸음수': 'steps', sleep: 'sleep', '수면': 'sleep', water: 'water', '물': 'water', workout: 'workout', exercise: 'workout', '운동': 'workout', focus: 'focus', '집중': 'focus' };
+  var MOODS = ['힘들어요', '별로예요', '보통이에요', '좋아요', '최고예요'];
+  var ICONS = {
+    today: '<path d="M9 6h11M9 12h11M9 18h11"/><path d="M3.5 6l1.2 1.2L6.8 5M3.5 12l1.2 1.2L6.8 11M3.5 18l1.2 1.2L6.8 17"/>',
+    hub: '<rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><rect x="13" y="13" width="7" height="7" rx="2"/>',
+    stats: '<path d="M5 20v-9M12 20V4M19 20v-6"/>',
+    manage: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>',
+    check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+    left: '<path d="M14 6l-6 6 6 6"/>',
+    right: '<path d="M10 6l6 6-6 6"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>'
+  };
+  var icon = function (n, cls) { return '<svg class="ico ' + (cls || '') + '" viewBox="0 0 24 24" aria-hidden="true">' + ICONS[n] + '</svg>'; };
+
+  /* ---------- helpers ---------- */
+  var $ = function (s) { return document.querySelector(s); };
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
+  var pad = function (n) { return String(n).padStart(2, '0'); };
+  var keyOf = function (d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+  var parseKey = function (k) { var p = k.split('-').map(Number); return new Date(p[0], p[1] - 1, p[2], 12); };
+  var addDays = function (k, n) { var d = parseKey(k); d.setDate(d.getDate() + n); return keyOf(d); };
+  var dowOf = function (k) { return parseKey(k).getDay(); };
+  var todayKey = function () { return keyOf(new Date()); };
+  var nowHM = function () { var d = new Date(); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
+  var fmt = function (n) { n = Number(n) || 0; return Number.isInteger(n) ? n.toLocaleString('ko-KR') : n.toFixed(1); };
+  var uid = function (p) { return (p || 'r') + Math.random().toString(36).slice(2, 8); };
+  var clone = function (o) { return JSON.parse(JSON.stringify(o)); };
+  var pct = function (x) { return Math.round(x * 100); };
+  var dateLabel = function (k) { var d = parseKey(k); return d.getFullYear() + '년 ' + (d.getMonth() + 1) + '월 ' + d.getDate() + '일'; };
+  var daysText = function (days) {
+    var s = days.slice().sort().join('');
+    if (s === '0123456') return '매일';
+    if (s === '12345') return '평일';
+    if (s === '06') return '주말';
+    return days.slice().sort().map(function (d) { return DOW[d]; }).join('·');
+  };
+
+  /* ---------- state ---------- */
+  function seed() {
+    var t = todayKey();
+    var mk = function (name, link, goal, time, days) { return { id: uid(), name: name, link: link, goal: goal, time: time, days: days || [0, 1, 2, 3, 4, 5, 6], created: t, ended: '', tool: '' }; };
+    var mkT = function (name, tool, goal, time, days) { var r = mk(name, 'tool', goal, time, days); r.tool = tool; return r; };
+    return {
+      v: 1, updatedAt: 0, hideIntro: false, remind: true, logs: {}, metrics: {}, notes: {},
+      routines: [
+        mk('아침 스트레칭', 'none', 0, '07:30'),
+        mk('물 8잔 마시기', 'water', 8, ''),
+        mkT('성경 3장 읽기', 'bible', 3, '06:30'),
+        mkT('독서 20분', 'reading', 20, '21:00'),
+        mkT('OPIc 스피킹 연습', 'opic', 1, '20:00', [1, 2, 3, 4, 5]),
+        mk('걷기 8,000보', 'steps', 8000, ''),
+        mk('집중 25분', 'focus', 25, '14:00', [1, 2, 3, 4, 5]),
+        mk('하루 일기 쓰기', 'note', 0, '22:00'),
+        mkT('역량 성장 플래너 점검', 'planner', 1, '21:30'),
+        mkT('가계부 기록', 'budget', 1, '22:30')
+      ]
+    };
+  }
+  function normalize(s) {
+    s = s || {};
+    return {
+      v: 1, updatedAt: s.updatedAt || 0,
+      routines: Array.isArray(s.routines) ? s.routines.map(function (r) {
+        return { id: String(r.id || uid()), name: String(r.name || '루틴'), link: LINK_NAMES[r.link] ? r.link : 'none', goal: Number(r.goal) || 0, time: r.time || '', days: Array.isArray(r.days) && r.days.length ? r.days.map(Number) : [0, 1, 2, 3, 4, 5, 6], created: r.created || todayKey(), ended: r.ended || '', tool: r.tool || '' };
+      }) : [],
+      logs: s.logs || {}, metrics: s.metrics || {}, notes: s.notes || {},
+      hideIntro: !!s.hideIntro, remind: s.remind !== false
+    };
+  }
+  function readLocal() {
+    try { var raw = localStorage.getItem(KEY); if (raw) return normalize(JSON.parse(raw)); } catch (e) {}
+    return null;
+  }
+  function writeLocal() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+
+  var state = readLocal() || seed();
+
+  var tab = 'today';
+  var viewKey = todayKey();
+  var lastToday = viewKey;
+  var wide = window.matchMedia('(min-width: 900px)');
+  var dismissed = {};
+  var notified = {};
+  var pendingRestore = null;
+
+  /* ---------- 계정 저장소(db): 허브가 중계해 준다 ---------- */
+  var CL = window.__hubClaude || window.claude;
+  var remote = null, pushTimer = 0, pushing = false, dirty = false;
+  var activity = {}, meas = {}, toolList = [];
+  var SYNC_TXT = { local: '이 기기에 저장', ok: '저장됨', busy: '저장 중…', err: '동기화 실패 · 이 기기에는 저장됨' };
+  function setSync(s) { var el = $('#sync'); el.dataset.s = s === 'busy' ? 'ok' : s; el.textContent = SYNC_TXT[s]; }
+  function schedulePush() { if (!remote) return; dirty = true; setSync('busy'); clearTimeout(pushTimer); pushTimer = setTimeout(push, 800); }
+  async function push() {
+    if (pushing) { pushTimer = setTimeout(push, 400); return; }
+    if (!dirty || !remote) return;
+    pushing = true; dirty = false;
+    try { await remote.set(clone(state)); if (!dirty) setSync('ok'); } catch (e) { setSync('err'); }
+    pushing = false;
+    if (dirty) schedulePush();
+  }
+  async function initRemote() {
+    try {
+      if (!CL || !CL.use) return;
+      var db = await CL.use('db'), user = await CL.use('user');
+      if (!db || !user) return;
+      var id = await user.id();
+      if (!id) return;
+      remote = db.doc('data/users/' + id + '/routine-state');
+      var snap = await remote.get();
+      if (snap.exists) {
+        var r = normalize(clone(snap.data()));
+        if (r.updatedAt > state.updatedAt) { state = r; writeLocal(); renderAll(); setSync('ok'); }
+        else if (r.updatedAt < state.updatedAt) schedulePush();
+        else setSync('ok');
+      } else if (state.updatedAt > 0) schedulePush();
+      else setSync('ok');
+      // 허브가 센 도구별 오늘의 기록 횟수를 실시간으로 받아서 연결된 루틴을 자동 체크한다
+      db.doc('data/users/' + id + '/hub-activity').onSnapshot(function (s) {
+        var ad = s.exists ? (s.data() || {}) : {};
+        activity = ad.days || {}; meas = ad.meas || {};
+        renderToday(); renderStats();
+      }, function () {});
+    } catch (e) { remote = null; setSync('local'); }
+  }
+  async function initTools() {
+    try { if (window.__hubTools) { toolList = (await window.__hubTools()) || []; renderAll(); } } catch (e) {}
+  }
+
+  /* ---------- domain ---------- */
+  function sched(r, k) { return k >= r.created && (!r.ended || k < r.ended) && r.days.indexOf(dowOf(k)) >= 0; }
+  function status(r, k) {
+    if (r.link === 'none') { var d = !!(state.logs[k] && state.logs[k][r.id]); return { done: d, p: d ? 1 : 0 }; }
+    if (r.link === 'note') { var n = !!((state.notes[k] && state.notes[k].text) || '').trim(); return { done: n, p: n ? 1 : 0 }; }
+    if (r.link === 'tool') { var tm = (meas[k] || {})[r.tool], ov = typeof tm === 'number' ? tm : (((activity[k] || {})[r.tool]) || 0), og = r.goal || 1; return { done: ov >= og, p: Math.min(1, ov / og), v: ov, g: og }; }
+    var v = (state.metrics[k] && state.metrics[k][r.link]) || 0, g = r.goal || 1;
+    return { done: v >= g, p: Math.min(1, v / g), v: v, g: g };
+  }
+  function toolUnit(key) {
+    var t = toolList.filter(function (x) { return x.key === key; })[0];
+    return (t && t.unit) || '회';
+  }
+  function toolName(key) {
+    var t = toolList.filter(function (x) { return x.key === key; })[0];
+    return t ? t.catName + ' · ' + t.name : (key || '도구');
+  }
+  function toolOptions(sel) {
+    var out = '', cat = '';
+    toolList.forEach(function (t) {
+      if (t.cat !== cat) { if (cat) out += '</optgroup>'; out += '<optgroup label="' + esc(t.catName) + '">'; cat = t.cat; }
+      out += '<option value="' + esc(t.key) + '"' + (t.key === sel ? ' selected' : '') + '>' + esc(t.name) + '</option>';
+    });
+    return out + (cat ? '</optgroup>' : '');
+  }
+  function listFor(k) { return state.routines.filter(function (r) { return sched(r, k); }); }
+  function dayRate(k) {
+    var l = listFor(k);
+    if (!l.length) return null;
+    return l.filter(function (r) { return status(r, k).done; }).length / l.length;
+  }
+  function streakOf(pred) {
+    var n = 0, k = todayKey();
+    for (var i = 0; i < 400; i++, k = addDays(k, -1)) {
+      var v = pred(k);
+      if (v === null) continue;
+      if (v) n++; else if (i === 0) continue; else break;
+    }
+    return n;
+  }
+  function setMetric(k, key, val) {
+    val = Math.max(0, Math.round((Number(val) || 0) * 10) / 10);
+    state.metrics[k] = state.metrics[k] || {};
+    state.metrics[k][key] = val;
+  }
+  function goalFor(key) {
+    var r = state.routines.filter(function (x) { return x.link === key && !x.ended; })[0] || state.routines.filter(function (x) { return x.link === key; })[0];
+    return r && r.goal ? r.goal : METRICS[key].goal;
+  }
+  function commit(only) {
+    state.updatedAt = Date.now();
+    writeLocal(); schedulePush();
+    if (only === 'today') renderToday(); else renderAll();
+  }
+
+  /* ---------- toast ---------- */
+  var toastT = 0;
+  function toast(msg) {
+    var el = $('#toast'); el.textContent = msg; el.hidden = false;
+    clearTimeout(toastT); toastT = setTimeout(function () { el.hidden = true; }, 2600);
+  }
+
+  /* ---------- render: shell ---------- */
+  var NAV = [['today', '오늘'], ['hub', '빠른 기록'], ['stats', '통계'], ['manage', '루틴 관리']];
+  function effTab() { return wide.matches && tab === 'hub' ? 'today' : tab; }
+  function renderShell() {
+    var t = effTab(), app = $('#app');
+    app.dataset.tab = t; app.dataset.wide = String(wide.matches);
+    $('#nav').innerHTML = NAV.map(function (n) {
+      return '<button type="button" data-act="nav" data-tab="' + n[0] + '"' + (n[0] === t ? ' aria-current="page"' : '') + '>' + icon(n[0]) + '<span>' + (n[0] === 'today' && wide.matches ? '대시보드' : n[1]) + '</span></button>';
+    }).join('');
+    var today = todayKey(), isToday = viewKey === today, d = parseKey(viewKey);
+    var diff = Math.round((parseKey(today) - d) / 864e5);
+    $('#dateH').innerHTML = esc(dateLabel(viewKey)) + '<small>' + DOW[d.getDay()] + '요일' + (isToday ? ' · 오늘' : ' · ' + diff + '일 전') + '</small>';
+    $('#daynav').innerHTML =
+      '<button class="btn icon" type="button" data-act="day-prev" aria-label="이전 날">' + icon('left') + '</button>' +
+      (isToday ? '' : '<button class="btn sm" type="button" data-act="day-today">오늘로</button>') +
+      '<button class="btn icon" type="button" data-act="day-next" aria-label="다음 날"' + (isToday ? ' disabled' : '') + '>' + icon('right') + '</button>';
+  }
+
+  /* ---------- render: today ---------- */
+  function dueRoutines() {
+    var k = todayKey(), now = nowHM(), nowMin = +now.slice(0, 2) * 60 + +now.slice(3);
+    return listFor(k).filter(function (r) {
+      if (!r.time || r.time > now || status(r, k).done || dismissed[r.id + k]) return false;
+      var m = +r.time.slice(0, 2) * 60 + +r.time.slice(3);
+      return nowMin - m <= 120;
+    }).sort(function (a, b) { return a.time < b.time ? 1 : -1; });
+  }
+  function rowHtml(r, k) {
+    var s = status(r, k), m = METRICS[r.link];
+    var late = k === todayKey() && !s.done && r.time && r.time <= nowHM();
+    var tick;
+    if (r.link === 'none') {
+      tick = '<button type="button" class="tick' + (s.done ? ' done' : '') + '" data-act="toggle" data-id="' + r.id + '" aria-pressed="' + s.done + '" aria-label="' + esc(r.name) + ' 완료 체크">' + (s.done ? icon('check') : '') + '</button>';
+    } else {
+      tick = '<span class="tick ring' + (s.done ? ' done' : '') + '" style="--p:' + pct(s.p) + '%" role="img" aria-label="' + (s.done ? '완료' : pct(s.p) + '%') + '">' + (s.done ? icon('check') : '') + '</span>';
+    }
+    var meta = '';
+    if (r.time) meta += '<span class="time' + (late ? ' late' : '') + '">' + r.time + (late ? ' 지남' : '') + '</span>';
+    if (m) meta += '<span class="mono">' + fmt(s.v) + ' / ' + fmt(s.g) + (r.link === 'tool' ? toolUnit(r.tool) : m.unit) + '</span>';
+    if (r.link !== 'none') meta += '<span class="hub">' + esc(r.link === 'tool' ? toolName(r.tool) : '빠른 기록 · ' + HUB_TAG[r.link]) + '</span>';
+    if (!meta) meta = '<span>하루 중 언제든</span>';
+    var act = '';
+    if (!s.done) {
+      if (m && m.quick) act = '<button type="button" class="btn sm" data-act="quick" data-id="' + r.id + '">+' + m.stepLbl + '</button>';
+      else if (r.link === 'focus' || r.link === 'sleep') act = '<button type="button" class="btn sm" data-act="goto-hub" data-link="' + r.link + '">' + (r.link === 'focus' ? '타이머' : '입력') + '</button>';
+      else if (r.link === 'note') act = '<button type="button" class="btn sm" data-act="goto-hub" data-link="note">쓰기</button>';
+    }
+    if (r.tool) act += '<button type="button" class="btn sm' + (r.link === 'tool' && !s.done ? ' primary' : '') + '" data-act="open-tool" data-tool="' + esc(r.tool) + '" aria-label="' + esc(toolName(r.tool)) + ' 열기">열기</button>';
+    if (act) act = '<span class="acts">' + act + '</span>';
+    return '<div class="row' + (s.done ? ' done' : '') + '">' + tick +
+      '<div style="min-width:0"><div class="nm">' + esc(r.name) + '</div><div class="meta">' + meta + '</div>' +
+      (m ? '<div class="bar pbar' + (s.done ? ' ok' : '') + '"><i style="width:' + pct(s.p) + '%"></i></div>' : '') + '</div>' + act + '</div>';
+  }
+  function renderToday() {
+    var k = viewKey, isToday = k === todayKey();
+    var list = listFor(k), done = list.filter(function (r) { return status(r, k).done; }).length;
+    var streak = streakOf(function (kk) { var x = dayRate(kk); return x === null ? null : x === 1; });
+    var h = '';
+
+    var due = isToday && state.remind ? dueRoutines() : [];
+    if (due.length) {
+      var r0 = due[0];
+      h += '<div class="notice" role="alert"><span><b>지금 할 시간이에요.</b> ' + esc(r0.name) + ' (' + r0.time + ')' + (due.length > 1 ? ' 외 ' + (due.length - 1) + '개' : '') + '</span><span class="acts">' +
+        (r0.link === 'none' ? '<button type="button" class="btn" data-act="banner-done" data-id="' + r0.id + '">완료</button>' : '') +
+        '<button type="button" class="btn" data-act="banner-dismiss" data-id="' + r0.id + '">나중에</button></span></div>';
+    }
+    if (!state.hideIntro) {
+      h += '<div class="notice info"><span><b>예시 루틴 ' + state.routines.length + '개로 시작했어요.</b> 루틴 탭에서 마음대로 고치거나 지울 수 있어요.</span><span class="acts"><button type="button" class="btn" data-act="intro-dismiss">확인</button></span></div>';
+    }
+
+    var left = list.length - done;
+    h += '<div class="card sum"><div class="sum-n mono">' + done + '<span class="of">/' + list.length + '</span></div>' +
+      '<div class="sum-t"><b>' + (list.length && !left ? '모두 마쳤어요' : '루틴 완료') + '</b><span>' + (list.length ? (left ? '남은 루틴 ' + left + '개' : (isToday ? '오늘도 해냈어요' : '이 날의 루틴을 모두 했어요')) : '예정된 루틴 없음') + '</span></div>' +
+      '<div class="streak"><span class="mono">' + streak + '</span>일 연속</div>' +
+      '<div class="bar' + (list.length && !left ? ' ok' : '') + '"><i style="width:' + (list.length ? pct(done / list.length) : 0) + '%"></i></div></div>';
+
+    if (!list.length) {
+      h += '<div class="list"><div class="empty"><b>이 날은 예정된 루틴이 없어요</b>루틴을 추가하면 여기에 체크리스트가 만들어져요.<br><button type="button" class="btn primary" data-act="new">' + icon('plus') + '루틴 추가</button></div></div>';
+    } else {
+      var groups = [['아침', '12:00 전', function (r) { return r.time && r.time < '12:00'; }],
+        ['오후', '12:00–18:00', function (r) { return r.time && r.time >= '12:00' && r.time < '18:00'; }],
+        ['저녁', '18:00 이후', function (r) { return r.time && r.time >= '18:00'; }],
+        ['언제든', '시간을 정하지 않은 루틴', function (r) { return !r.time; }]];
+      groups.forEach(function (g) {
+        var items = list.filter(g[2]).sort(function (a, b) { return (a.time || '99') < (b.time || '99') ? -1 : 1; });
+        if (!items.length) return;
+        h += '<div><div class="sec-h"><h2>' + g[0] + '</h2><span>' + g[1] + '</span></div><div class="list">' + items.map(function (r) { return rowHtml(r, k); }).join('') + '</div></div>';
+      });
+    }
+    $('#pane-today').innerHTML = h;
+  }
+
+  /* ---------- render: hub ---------- */
+  var timer = { dur: 25, left: 25 * 60, running: false, endAt: 0, iv: 0 };
+  var fmtClock = function (s) { return pad(Math.floor(s / 60)) + ':' + pad(s % 60); };
+  function metricCard(key) {
+    var m = METRICS[key], k = viewKey, v = (state.metrics[k] && state.metrics[k][key]) || 0, g = goalFor(key);
+    var linked = state.routines.filter(function (r) { return r.link === key; });
+    var p = Math.min(1, v / g);
+    return '<article class="card mod" id="mod-' + key + '"><div class="mod-h"><span class="label">' + m.label + '</span><span class="tag">목표 ' + fmt(g) + m.unit + '</span></div>' +
+      '<div class="big"><span class="mono">' + fmt(v) + '</span><span class="of">' + m.unit + (v >= g ? ' · 달성' : '') + '</span></div>' +
+      '<div class="bar' + (v >= g ? ' ok' : '') + '"><i style="width:' + pct(p) + '%"></i></div>' +
+      '<div class="ctl"><button type="button" class="btn sm icon" data-act="m-add" data-key="' + key + '" data-d="-1" aria-label="' + m.label + ' 줄이기">−</button>' +
+      '<input type="number" id="in-' + key + '" data-metric="' + key + '" min="0" step="' + m.step + '" inputmode="decimal" value="' + v + '" aria-label="' + m.label + ' (' + m.unit + ')">' +
+      '<button type="button" class="btn sm" data-act="m-add" data-key="' + key + '" data-d="1">+' + m.stepLbl + '</button></div>' +
+      '<div class="links">' + (linked.length ? '연결된 루틴: ' + linked.map(function (r) { return esc(r.name); }).join(', ') : '연결된 루틴이 없어요. 루틴 탭에서 연결해 보세요.') + '</div></article>';
+  }
+  function renderHub() {
+    var k = viewKey, isToday = k === todayKey();
+    var n = state.notes[k] || {};
+    var h = '<div class="sec-h"><h2>빠른 기록</h2><span>' + (isToday ? '오늘' : esc(dateLabel(k))) + ' 기록</span></div>' +
+      '<p class="hub-intro">여기에 기록한 값이 연결된 루틴에 바로 반영돼요. 목표에 닿으면 체크가 자동으로 채워져요.</p><div class="mods">';
+    ['steps', 'water', 'sleep', 'workout'].forEach(function (key) { h += metricCard(key); });
+
+    var focusMin = (state.metrics[k] && state.metrics[k].focus) || 0, idle = !timer.running && timer.left === timer.dur * 60;
+    h += '<article class="card mod wide" id="mod-focus"><div class="mod-h"><span class="label">집중 타이머</span><span class="tag">' + (isToday ? '오늘' : esc(dateLabel(k))) + ' 누적 <span class="mono" id="focusSum">' + fmt(focusMin) + '</span>분 · 목표 ' + fmt(goalFor('focus')) + '분</span></div>' +
+      '<div class="presets" role="group" aria-label="타이머 길이">' + [15, 25, 45, 60].map(function (m) { return '<button type="button" class="pill" data-act="timer-preset" data-m="' + m + '" aria-pressed="' + (timer.dur === m) + '"' + (idle ? '' : ' disabled') + '>' + m + '분</button>'; }).join('') + '</div>' +
+      '<div class="timer-t mono" id="timerT">' + fmtClock(timer.left) + '</div>' +
+      '<div class="btns"><button type="button" class="btn primary" id="timerBtn" data-act="timer-toggle">' + (timer.running ? '일시정지' : (idle ? '시작' : '이어서')) + '</button>' +
+      '<button type="button" class="btn" data-act="timer-finish"' + (idle ? ' disabled' : '') + '>여기까지 기록</button>' +
+      '<button type="button" class="btn" data-act="timer-reset"' + (idle ? ' disabled' : '') + '>처음으로</button></div>' +
+      '<div class="links">끝까지 채우거나 “여기까지 기록”을 누르면 오늘 집중 시간에 더해져요.</div></article>';
+
+    h += '<article class="card mod wide" id="mod-note"><div class="mod-h"><span class="label">오늘의 기록</span><span class="tag">' + (isToday ? '오늘' : esc(dateLabel(k))) + '</span></div>' +
+      '<div class="moods" role="group" aria-label="기분">' + MOODS.map(function (t, i) { return '<button type="button" data-act="mood" data-m="' + (i + 1) + '" aria-pressed="' + (n.mood === i + 1) + '">' + t + '</button>'; }).join('') + '</div>' +
+      '<textarea id="note-text" placeholder="오늘 하루는 어땠나요? 한 줄이라도 적으면 ‘일기’ 루틴이 체크돼요." aria-label="오늘의 기록">' + esc(n.text || '') + '</textarea></article>';
+
+    h += '<article class="card mod wide" id="mod-data"><div class="mod-h"><span class="label">데이터 연동</span></div>' +
+      '<div class="field"><label for="imp-text" style="font-weight:600;font-size:13px">건강 데이터 가져오기</label>' +
+      '<p class="help">건강 앱이나 시계에서 내보낸 값을 한 줄에 하나씩 붙여 넣어요. 항목은 steps, sleep, water, workout, focus를 쓸 수 있어요.</p>' +
+      '<pre class="code">2026-10-25,steps,8423\n2026-10-25,sleep,6.5</pre>' +
+      '<textarea id="imp-text" placeholder="날짜,항목,값" style="min-height:76px"></textarea></div>' +
+      '<div class="btns"><button type="button" class="btn primary" data-act="import-run">가져오기</button><label class="btn file">파일 선택<input type="file" id="imp-file" accept=".csv,.txt,.json" hidden></label></div>' +
+      '<p class="msg" id="imp-msg" role="status"></p>' +
+      '<div class="btns" style="border-top:1px solid var(--line);padding-top:12px"><button type="button" class="btn" data-act="export" id="exportBtn" hidden>백업 파일 저장</button>' +
+      '<label class="check"><input type="checkbox" id="opt-remind"' + (state.remind ? ' checked' : '') + '><span>정해 둔 시간이 지나면 화면에 알려 주기</span></label>' +
+      '<button type="button" class="btn sm" data-act="notify-req">브라우저 알림 켜기</button></div>' +
+      '<p class="help" id="notify-help">알림은 이 화면이 열려 있는 동안 동작해요.</p></article>';
+    h += '</div>';
+    $('#pane-hub').innerHTML = h;
+    updateExportBtn();
+    if (pendingRestore) showRestore();
+  }
+
+  /* ---------- render: stats ---------- */
+  function renderStats() {
+    var today = todayKey(), i, k;
+    var days7 = []; for (i = 6; i >= 0; i--) days7.push(addDays(today, -i));
+    var avg = function (keys) { var xs = keys.map(dayRate).filter(function (x) { return x !== null; }); return xs.length ? xs.reduce(function (a, b) { return a + b; }, 0) / xs.length : null; };
+    var days30 = []; for (i = 29; i >= 0; i--) days30.push(addDays(today, -i));
+    var a7 = avg(days7), a30 = avg(days30);
+    var streak = streakOf(function (kk) { var x = dayRate(kk); return x === null ? null : x === 1; });
+    var h = '<div class="sec-h"><h2>통계</h2><span>달성률은 그날 예정된 루틴 기준이에요</span></div>';
+    h += '<div class="card kpis"><div class="kpi"><span class="mono">' + streak + '</span><span>연속 달성(일)</span></div>' +
+      '<div class="kpi"><span class="mono">' + (a7 === null ? '–' : pct(a7) + '%') + '</span><span>최근 7일</span></div>' +
+      '<div class="kpi"><span class="mono">' + (a30 === null ? '–' : pct(a30) + '%') + '</span><span>최근 30일</span></div></div>';
+
+    var W = 320, H = 170, L = 32, R = 6, T = 18, B = 24, pw = W - L - R, ph = H - T - B, slot = pw / 7, bw = 26;
+    var y = function (v) { return T + (1 - v) * ph; };
+    var svg = '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="최근 7일 달성률 막대 그래프">';
+    [0, .5, 1].forEach(function (g) { svg += '<line class="gl" x1="' + L + '" x2="' + (W - R) + '" y1="' + y(g) + '" y2="' + y(g) + '"/><text x="' + (L - 6) + '" y="' + (y(g) + 3) + '" text-anchor="end">' + pct(g) + '</text>'; });
+    days7.forEach(function (kk, idx) {
+      var r = dayRate(kk), cx = L + slot * idx + slot / 2, isT = kk === today;
+      if (r === null) svg += '<rect class="none" x="' + (cx - bw / 2) + '" y="' + (y(0) - 2) + '" width="' + bw + '" height="2" rx="1"/>';
+      else {
+        var hh = Math.max(2, r * ph);
+        svg += '<rect class="b' + (isT ? ' t' : '') + '" x="' + (cx - bw / 2) + '" y="' + (y(0) - hh) + '" width="' + bw + '" height="' + hh + '" rx="4"/>';
+        svg += '<text class="v" x="' + cx + '" y="' + (y(0) - hh - 4) + '" text-anchor="middle">' + pct(r) + '</text>';
+      }
+      svg += '<text x="' + cx + '" y="' + (H - 7) + '" text-anchor="middle"' + (isT ? ' class="v"' : '') + '>' + DOW[dowOf(kk)] + '</text>';
+    });
+    svg += '</svg>';
+    h += '<div><div class="sec-h"><h2>최근 7일 달성률 (%)</h2></div><div class="card">' + svg + '</div></div>';
+
+    var startK = addDays(today, -dowOf(today) - 28), heat = '', lbl = '';
+    for (i = 0; i < 7; i++) lbl += '<span>' + DOW[i] + '</span>';
+    for (var w = 0; w < 5; w++) for (var d = 0; d < 7; d++) {
+      k = addDays(startK, w * 7 + d);
+      if (k > today) { heat += '<i class="f"></i>'; continue; }
+      var r2 = dayRate(k), md = parseKey(k);
+      var tip = (md.getMonth() + 1) + '/' + md.getDate() + ' · ' + (r2 === null ? '예정 없음' : pct(r2) + '%');
+      heat += '<i class="' + (r2 === null ? 'n' : '') + (k === today ? ' t' : '') + '" title="' + tip + '" style="' + (r2 === null ? '' : 'background:color-mix(in srgb,var(--accent) ' + pct(r2) + '%,var(--surface2))') + '"></i>';
+    }
+    h += '<div><div class="sec-h"><h2>최근 5주</h2><span>진할수록 많이 했어요</span></div><div class="card"><div class="heat-wrap"><div class="heat-l">' + lbl + '</div><div class="heat" role="img" aria-label="최근 5주 달성 현황">' + heat + '</div></div>' +
+      '<div class="legend"><span>적음</span>' + [0, 25, 50, 75, 100].map(function (p) { return '<i style="background:color-mix(in srgb,var(--accent) ' + p + '%,var(--surface2))"></i>'; }).join('') + '<span>많음</span><span style="margin-left:8px">점선 칸은 예정된 루틴이 없던 날</span></div></div></div>';
+
+    var rows = state.routines.map(function (r) {
+      var sc = days30.filter(function (kk) { return sched(r, kk); }), dn = sc.filter(function (kk) { return status(r, kk).done; }).length;
+      var rate = sc.length ? dn / sc.length : null;
+      var st = streakOf(function (kk) { return sched(r, kk) ? status(r, kk).done : null; });
+      return '<div class="rt"><span class="nm">' + esc(r.name) + '</span><div class="bar"><i style="width:' + (rate === null ? 0 : pct(rate)) + '%"></i></div><span class="mono">' + (rate === null ? '–' : pct(rate) + '%') + '</span><span class="sub">' + dn + '/' + sc.length + '일 · 연속 ' + st + '일</span></div>';
+    }).join('');
+    h += '<div><div class="sec-h"><h2>루틴별 30일</h2></div><div class="list">' + (rows || '<div class="empty">아직 루틴이 없어요.</div>') + '</div></div>';
+    $('#pane-stats').innerHTML = h;
+  }
+
+  /* ---------- render: manage ---------- */
+  function renderManage() {
+    var h = '<div class="sec-h"><h2>루틴 관리</h2><button type="button" class="btn primary sm" data-act="new">' + icon('plus') + '루틴 추가</button></div>';
+    if (!state.routines.length) h += '<div class="list"><div class="empty"><b>등록된 루틴이 없어요</b>첫 루틴을 추가해 보세요.</div></div>';
+    else h += '<div class="list">' + state.routines.map(function (r) {
+      var m = METRICS[r.link];
+      var parts = [daysText(r.days), r.time || '시간 미정', r.link === 'none' ? '직접 체크' : r.link === 'tool' ? toolName(r.tool) + ' ' + fmt(r.goal) + toolUnit(r.tool) : '빠른 기록 · ' + HUB_TAG[r.link] + (m ? ' ' + fmt(r.goal) + m.unit : '')];
+      var paused = r.ended && r.ended <= todayKey();
+      return '<button type="button" class="mrow' + (paused ? ' paused' : '') + '" data-act="edit" data-id="' + r.id + '"><span style="min-width:0"><span class="nm">' + esc(r.name) + '</span><span class="meta" style="display:flex">' + parts.map(esc).join(' · ') + '</span></span>' + (paused ? '<span class="badge">중지됨</span>' : '') + '</button>';
+    }).join('') + '</div>';
+    $('#pane-manage').innerHTML = h;
+  }
+
+  function renderAll() { renderShell(); renderToday(); renderHub(); renderStats(); renderManage(); }
+
+  /* ---------- sheet (add / edit routine) ---------- */
+  var editingId = null;
+  function openSheet(id) {
+    editingId = id || null;
+    var r = id ? state.routines.filter(function (x) { return x.id === id; })[0] : { name: '', link: 'none', goal: 0, time: '', days: [0, 1, 2, 3, 4, 5, 6] };
+    if (!r) return;
+    var m = METRICS[r.link];
+    var paused = r.ended && r.ended <= todayKey();
+    var h = '<h2 id="sheet-title">' + (id ? '루틴 수정' : '루틴 추가') + '</h2>' +
+      '<div class="field"><label for="f-name">이름</label><input type="text" id="f-name" maxlength="40" value="' + esc(r.name) + '" placeholder="예: 스트레칭 10분" autocomplete="off"></div>' +
+      '<div class="field"><label for="f-link">체크 방식</label><select id="f-link">' + Object.keys(LINK_NAMES).map(function (k) { return '<option value="' + k + '"' + (k === r.link ? ' selected' : '') + '>' + LINK_NAMES[k] + '</option>'; }).join('') + '</select>' +
+      '<p class="help" id="link-help"></p></div>' +
+      '<div class="field" id="tool-row"><label for="f-tool">영역 도구 연결</label><select id="f-tool"><option value="">연결하지 않음</option>' + toolOptions(r.tool || '') + '</select><p class="help">고르면 오늘 화면의 루틴에 “열기” 버튼이 생기고, 체크 방식이 “영역 도구에 기록”이면 그 도구에 저장할 때 자동으로 체크돼요.</p></div>' +
+      '<div class="row2"><div class="field" id="goal-row"' + (m ? '' : ' hidden') + '><label for="f-goal">하루 목표 <span id="goal-unit">' + (m ? '(' + m.unit + ')' : '') + '</span></label><input type="number" id="f-goal" min="0" step="any" inputmode="decimal" value="' + (r.goal || (m ? m.goal : '')) + '"></div>' +
+      '<div class="field"><label for="f-time">알림 시간</label><input type="time" id="f-time" value="' + esc(r.time) + '"></div></div>' +
+      '<div class="field"><span class="lb">반복 요일</span><div class="days" role="group" aria-label="반복 요일">' + DOW.map(function (d, i) { return '<label class="chip"><input type="checkbox" class="f-day" value="' + i + '"' + (r.days.indexOf(i) >= 0 ? ' checked' : '') + ' aria-label="' + d + '요일"><span>' + d + '</span></label>'; }).join('') + '</div>' +
+      '<div class="btns"><button type="button" class="linkbtn" data-act="days-preset" data-p="all">매일</button><button type="button" class="linkbtn" data-act="days-preset" data-p="week">평일</button><button type="button" class="linkbtn" data-act="days-preset" data-p="end">주말</button></div></div>' +
+      '<p class="msg err" id="f-err" role="alert"></p>' +
+      '<div class="sheet-f"><button type="button" class="btn primary" data-act="sheet-save">저장</button><button type="button" class="btn" data-act="sheet-close">취소</button><span class="sp"></span>' +
+      (id ? '<button type="button" class="btn" data-act="sheet-pause">' + (paused ? '다시 시작' : '일시중지') + '</button><button type="button" class="btn danger" data-act="sheet-delete">삭제</button>' : '') + '</div>';
+    $('#sheet').innerHTML = h;
+    $('#scrim').hidden = false;
+    syncLinkHelp();
+    setTimeout(function () { var f = $('#f-name'); if (f && !id) f.focus(); }, 30);
+  }
+  function closeSheet() { $('#scrim').hidden = true; editingId = null; }
+  function syncLinkHelp() {
+    var link = $('#f-link').value, m = METRICS[link];
+    $('#goal-row').hidden = !m;
+    if (m) $('#goal-unit').textContent = '(' + (link === 'tool' ? toolUnit($('#f-tool').value) : m.unit) + ')';
+    $('#link-help').textContent = link === 'none' ? '직접 눌러서 완료를 체크해요.' : link === 'tool' ? '아래에서 고른 도구의 오늘 기록으로 자동 체크돼요. 성경 읽기처럼 수치(장 수)를 알려 주는 도구는 그 수치로, 그 밖의 도구는 저장한 횟수로 따져요.' : link === 'note' ? '오늘의 기록에 한 줄이라도 쓰면 자동으로 체크돼요.' : '빠른 기록에 입력한 ' + m.label + ' 값이 목표에 닿으면 자동으로 체크돼요.';
+  }
+  function saveSheet() {
+    var name = $('#f-name').value.trim(), link = $('#f-link').value, err = $('#f-err');
+    var days = Array.prototype.map.call(document.querySelectorAll('.f-day:checked'), function (c) { return +c.value; });
+    var goal = METRICS[link] ? Number($('#f-goal').value) : 0;
+    if (!name) { err.textContent = '루틴 이름을 입력해 주세요.'; $('#f-name').focus(); return; }
+    if (!days.length) { err.textContent = '반복할 요일을 하나 이상 골라 주세요.'; return; }
+    if (METRICS[link] && !(goal > 0)) { err.textContent = '하루 목표를 0보다 크게 입력해 주세요.'; $('#f-goal').focus(); return; }
+    var tool = $('#f-tool').value || '';
+    if (link === 'tool' && !tool) { err.textContent = '자동으로 체크할 영역 도구를 골라 주세요.'; $('#f-tool').focus(); return; }
+    var time = $('#f-time').value || '';
+    if (editingId) {
+      var r = state.routines.filter(function (x) { return x.id === editingId; })[0];
+      r.name = name; r.link = link; r.goal = goal; r.time = time; r.days = days; r.tool = tool;
+    } else {
+      state.routines.push({ id: uid(), name: name, link: link, goal: goal, time: time, days: days, created: todayKey(), ended: '', tool: tool });
+    }
+    closeSheet(); commit(); toast(editingId === null ? '루틴을 추가했어요' : '저장했어요');
+  }
+
+  /* ---------- timer ---------- */
+  function beep() {
+    try {
+      var A = window.AudioContext || window.webkitAudioContext, c = new A(), o = c.createOscillator(), g = c.createGain();
+      o.connect(g); g.connect(c.destination); o.frequency.value = 880;
+      g.gain.setValueAtTime(.12, c.currentTime); g.gain.exponentialRampToValueAtTime(.001, c.currentTime + .8);
+      o.start(); o.stop(c.currentTime + .8);
+    } catch (e) {}
+  }
+  function timerTick() {
+    if (!timer.running) return;
+    timer.left = Math.max(0, Math.round((timer.endAt - Date.now()) / 1000));
+    var el = $('#timerT'); if (el) el.textContent = fmtClock(timer.left);
+    if (timer.left <= 0) finishTimer(true);
+  }
+  function finishTimer(full) {
+    clearInterval(timer.iv); timer.running = false;
+    var mins = full ? timer.dur : Math.floor((timer.dur * 60 - timer.left) / 60);
+    timer.left = timer.dur * 60;
+    if (mins > 0) {
+      var k = todayKey(), cur = (state.metrics[k] && state.metrics[k].focus) || 0;
+      setMetric(k, 'focus', cur + mins);
+      if (full) beep();
+      toast('집중 ' + mins + '분을 기록했어요');
+      commit();
+    } else { toast('1분 미만은 기록하지 않아요'); renderHub(); }
+  }
+
+  /* ---------- import / export ---------- */
+  var isDate = function (s) { return /^\d{4}-\d{2}-\d{2}$/.test(s); };
+  var isHealth = function (k) { return k !== 'tool' && !!METRICS[k]; };
+  function importText(txt) {
+    txt = txt.trim();
+    if (!txt) return { err: '붙여넣은 내용이 없어요.' };
+    var n = 0;
+    try {
+      var j = JSON.parse(txt);
+      if (j && Array.isArray(j.routines)) return { backup: j };
+      if (j && typeof j === 'object') {
+        Object.keys(j).forEach(function (d) {
+          if (!isDate(d) || !j[d] || typeof j[d] !== 'object') return;
+          Object.keys(j[d]).forEach(function (m) { var key = ALIAS[m.toLowerCase()] || m; if (isHealth(key) && isFinite(+j[d][m])) { setMetric(d, key, +j[d][m]); n++; } });
+        });
+        return { n: n };
+      }
+    } catch (e) {}
+    txt.split(/\r?\n/).forEach(function (line) {
+      var p = line.split(/[,\t;]/).map(function (s) { return s.trim(); });
+      if (p.length < 3) return;
+      var key = ALIAS[p[1].toLowerCase()] || p[1];
+      if (isDate(p[0]) && isHealth(key) && isFinite(+p[2]) && p[2] !== '') { setMetric(p[0], key, +p[2]); n++; }
+    });
+    return { n: n };
+  }
+  function showMsg(t, cls) { var el = $('#imp-msg'); if (el) { el.className = 'msg ' + (cls || ''); el.textContent = t; } }
+  function showRestore() {
+    var el = $('#imp-msg'); if (!el) return;
+    el.className = 'msg err';
+    el.innerHTML = '백업 파일이에요. 지금 데이터를 덮어쓸까요? <button type="button" class="linkbtn" data-act="restore-yes">덮어쓰기</button> · <button type="button" class="linkbtn" data-act="restore-no">취소</button>';
+  }
+  async function updateExportBtn() {
+    var b = $('#exportBtn'); if (!b) return;
+    try { var d = CL && CL.use ? await CL.use('downloads') : null; b.hidden = !d; } catch (e) { b.hidden = true; }
+  }
+  async function exportBackup() {
+    try {
+      var d = await CL.use('downloads');
+      await d.save({ filename: 'routine-hub-' + todayKey() + '.json', data: JSON.stringify(state, null, 1) });
+      toast('백업 파일을 저장했어요');
+    } catch (e) { if (!e || e.code !== 'declined') toast('이 화면에서는 파일을 저장할 수 없어요'); }
+  }
+  async function notifyRequest() {
+    var help = $('#notify-help');
+    if (typeof Notification === 'undefined') { help.textContent = '이 화면에서는 브라우저 알림을 쓸 수 없어요. 앱이 열려 있는 동안 화면 안에서 알려 드려요.'; return; }
+    try {
+      var p = await Notification.requestPermission();
+      help.textContent = p === 'granted' ? '브라우저 알림이 켜졌어요. 이 화면이 열려 있는 동안 시간이 되면 알려 드려요.' : '브라우저 알림이 허용되지 않았어요. 화면 안 안내는 그대로 동작해요.';
+    } catch (e) { help.textContent = '이 화면에서는 브라우저 알림을 쓸 수 없어요. 화면 안 안내는 그대로 동작해요.'; }
+  }
+  function checkNotify() {
+    if (!state.remind) return;
+    var k = todayKey();
+    dueRoutines().forEach(function (r) {
+      if (notified[r.id + k]) return;
+      notified[r.id + k] = 1;
+      try { if (typeof Notification !== 'undefined' && Notification.permission === 'granted') new Notification('루틴 허브', { body: r.name + ' 할 시간이에요 (' + r.time + ')' }); } catch (e) {}
+    });
+  }
+
+  /* ---------- events ---------- */
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest('[data-act]');
+    if (!t) { if (e.target.id === 'scrim') closeSheet(); return; }
+    var act = t.dataset.act, id = t.dataset.id, r;
+    var byId = function (x) { return state.routines.filter(function (q) { return q.id === x; })[0]; };
+    switch (act) {
+      case 'nav': tab = t.dataset.tab; renderShell(); window.scrollTo(0, 0); break;
+      case 'day-prev': viewKey = addDays(viewKey, -1); renderAll(); break;
+      case 'day-next': if (viewKey < todayKey()) { viewKey = addDays(viewKey, 1); renderAll(); } break;
+      case 'day-today': viewKey = todayKey(); renderAll(); break;
+      case 'toggle':
+        state.logs[viewKey] = state.logs[viewKey] || {};
+        if (state.logs[viewKey][id]) delete state.logs[viewKey][id]; else state.logs[viewKey][id] = true;
+        commit(); break;
+      case 'quick':
+        r = byId(id); if (!r) break;
+        setMetric(viewKey, r.link, ((state.metrics[viewKey] && state.metrics[viewKey][r.link]) || 0) + METRICS[r.link].quick);
+        commit(); break;
+      case 'goto-hub':
+        tab = 'hub'; renderShell();
+        var mod = $('#mod-' + t.dataset.link) || $('#mod-note');
+        if (mod) { try { mod.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (x) {} if (t.dataset.link === 'note') { var ta = $('#note-text'); if (ta) ta.focus({ preventScroll: true }); } }
+        break;
+      case 'm-add':
+        var key = t.dataset.key, cur = (state.metrics[viewKey] && state.metrics[viewKey][key]) || 0;
+        setMetric(viewKey, key, cur + METRICS[key].step * Number(t.dataset.d)); commit(); break;
+      case 'mood':
+        state.notes[viewKey] = state.notes[viewKey] || {};
+        state.notes[viewKey].mood = state.notes[viewKey].mood === +t.dataset.m ? 0 : +t.dataset.m;
+        commit(); break;
+      case 'timer-preset': timer.dur = +t.dataset.m; timer.left = timer.dur * 60; renderHub(); break;
+      case 'timer-toggle':
+        if (timer.running) { timerTick(); clearInterval(timer.iv); timer.running = false; }
+        else { timer.running = true; timer.endAt = Date.now() + timer.left * 1000; timer.iv = setInterval(timerTick, 250); }
+        renderHub(); break;
+      case 'timer-reset': clearInterval(timer.iv); timer.running = false; timer.left = timer.dur * 60; renderHub(); break;
+      case 'timer-finish': if (timer.running) timerTick(); if (timer.running || timer.left < timer.dur * 60) finishTimer(false); break;
+      case 'new': openSheet(null); break;
+      case 'edit': openSheet(id); break;
+      case 'sheet-close': closeSheet(); break;
+      case 'sheet-save': saveSheet(); break;
+      case 'days-preset':
+        var set = { all: [0, 1, 2, 3, 4, 5, 6], week: [1, 2, 3, 4, 5], end: [0, 6] }[t.dataset.p];
+        document.querySelectorAll('.f-day').forEach(function (c) { c.checked = set.indexOf(+c.value) >= 0; }); break;
+      case 'sheet-pause':
+        r = byId(editingId); if (!r) break;
+        if (r.ended && r.ended <= todayKey()) r.ended = ''; else r.ended = todayKey();
+        closeSheet(); commit(); toast(r.ended ? '일시중지했어요' : '다시 시작해요'); break;
+      case 'sheet-delete':
+        if (t.dataset.armed !== '1') { t.dataset.armed = '1'; t.textContent = '정말 삭제'; break; }
+        state.routines = state.routines.filter(function (q) { return q.id !== editingId; });
+        Object.keys(state.logs).forEach(function (d) { delete state.logs[d][editingId]; });
+        closeSheet(); commit(); toast('루틴을 삭제했어요'); break;
+      case 'banner-done':
+        state.logs[todayKey()] = state.logs[todayKey()] || {}; state.logs[todayKey()][id] = true; commit(); break;
+      case 'banner-dismiss': dismissed[id + todayKey()] = 1; renderToday(); break;
+      case 'intro-dismiss': state.hideIntro = true; commit(); break;
+      case 'import-run':
+        var res = importText($('#imp-text').value);
+        if (res.err) showMsg(res.err, 'err');
+        else if (res.backup) { pendingRestore = res.backup; showRestore(); }
+        else if (!res.n) showMsg('읽을 수 있는 줄이 없어요. 날짜,항목,값 형식인지 확인해 주세요.', 'err');
+        else { commit(); showMsg(res.n + '개 값을 가져왔어요.', 'ok'); }
+        break;
+      case 'restore-yes':
+        if (pendingRestore) { var ts = state.updatedAt; state = normalize(pendingRestore); state.updatedAt = Math.max(Date.now(), ts + 1);
+          pendingRestore = null; commit(); toast('백업에서 복원했어요'); }
+        break;
+      case 'restore-no': pendingRestore = null; showMsg('', ''); break;
+      case 'export': exportBackup(); break;
+      case 'notify-req': notifyRequest(); break;
+      case 'open-tool': if (window.__hubNav) window.__hubNav(t.dataset.tool); else toast('허브 안에서 열 수 있어요'); break;
+    }
+  });
+  document.addEventListener('change', function (e) {
+    var t = e.target;
+    if (t.dataset && t.dataset.metric) { setMetric(viewKey, t.dataset.metric, t.value); commit(); }
+    else if (t.id === 'f-link') { var m = METRICS[t.value]; if (m) $('#f-goal').value = m.goal; syncLinkHelp(); }
+    else if (t.id === 'f-tool') syncLinkHelp();
+    else if (t.id === 'opt-remind') { state.remind = t.checked; commit('today'); }
+    else if (t.id === 'imp-file' && t.files && t.files[0]) {
+      var fr = new FileReader();
+      fr.onload = function () { $('#imp-text').value = String(fr.result || ''); showMsg('파일을 불러왔어요. 가져오기를 눌러 주세요.', 'ok'); };
+      fr.readAsText(t.files[0]);
+    }
+  });
+  var noteT = 0;
+  document.addEventListener('input', function (e) {
+    if (e.target.id !== 'note-text') return;
+    state.notes[viewKey] = state.notes[viewKey] || {};
+    state.notes[viewKey].text = e.target.value;
+    clearTimeout(noteT); noteT = setTimeout(function () { commit('today'); }, 500);
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !$('#scrim').hidden) closeSheet();
+    if (e.key === 'Enter' && e.target.id === 'f-name') { e.preventDefault(); saveSheet(); }
+  });
+  wide.addEventListener('change', renderAll);
+
+  function heartbeat() {
+    var t = todayKey();
+    if (t !== lastToday) { if (viewKey === lastToday) viewKey = t; lastToday = t; renderAll(); return; }
+    checkNotify();
+    if (viewKey === t) renderToday();
+  }
+  setInterval(heartbeat, 30000);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) heartbeat(); });
+
+  renderAll();
+  checkNotify();
+  initRemote();
+  initTools();
+})();
+</script>
+</body>
+</html>

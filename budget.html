@@ -1,0 +1,2873 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<script>
+/* 허브 안에서 열렸을 때: 허브(부모 화면)에게 메시지로 부탁해서 계정 저장소·Claude 기능을 쓴다.
+   (허브 안 화면은 보안상 부모의 기능을 직접 만질 수 없을 수 있어서, 항상 메시지로 주고받는다) */
+(function () {
+  if (window.parent === window) return;
+  var P = window.parent, seq = 0, pending = {}, subs = {};
+  function post(m) { m.__hub = 1; P.postMessage(m, '*'); }
+  function call(cap, op, args) {
+    return new Promise(function (res, rej) {
+      var id = ++seq; pending[id] = { res: res, rej: rej };
+      post({ id: id, cap: cap, op: op, args: args || [] });
+    });
+  }
+  function docSnap(d) {
+    var body = d.data;
+    return { id: d.id, exists: !!d.exists, metadata: d.metadata || {},
+      data: function () { return body == null ? undefined : JSON.parse(JSON.stringify(body)); } };
+  }
+  function wrap(s) {
+    if (!s) return s;
+    if (s.kind === 'doc') return docSnap(s);
+    var docs = (s.docs || []).map(docSnap);
+    return { docs: docs, size: docs.length, empty: !docs.length, metadata: s.metadata || {}, docChanges: function () { return []; } };
+  }
+  window.addEventListener('message', function (e) {
+    if (e.source !== P) return;
+    var m = e.data; if (!m || !m.__hubr) return;
+    if (m.sub) { var s = subs[m.sub]; if (!s) return; if (m.err) { if (s.err) s.err(m.err); } else s.next(wrap(m.snap)); return; }
+    var p = pending[m.id]; if (!p) return; delete pending[m.id];
+    if (m.err) p.rej(m.err); else p.res(m.val);
+  });
+  function subscribe(kind, path, lim, next, err) {
+    var id = ++seq; subs[id] = { next: next, err: err };
+    post({ sub: id, kind: kind, path: path, lim: lim || null });
+    return function () { delete subs[id]; post({ unsub: id }); };
+  }
+  function docRef(path) {
+    return {
+      id: path.split('/').pop(), path: path,
+      get: function () { return call('db', 'docGet', [path]).then(wrap); },
+      set: function (d) { return call('db', 'docSet', [path, d]); },
+      update: function (d) { return call('db', 'docUpdate', [path, d]); },
+      'delete': function () { return call('db', 'docDel', [path]); },
+      collection: function (sub) { return colRef(path + '/' + sub); },
+      onSnapshot: function (next, err) { return subscribe('doc', path, null, next, err); }
+    };
+  }
+  function colRef(path, lim) {
+    return {
+      path: path,
+      doc: function (id) { return docRef(path + '/' + (id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 8)))); },
+      limit: function (n) { return colRef(path, n); },
+      get: function () { return call('db', 'colGet', [path, lim || null]).then(wrap); },
+      onSnapshot: function (next, err) { return subscribe('col', path, lim, next, err); }
+    };
+  }
+  function plainOpts(o) { if (!o) return null; var r = {}; if (o.modelTier) r.modelTier = o.modelTier; if (typeof o.cache === 'boolean') r.cache = o.cache; return r; }
+  var capsP = null;
+  function caps() {
+    if (!capsP) capsP = new Promise(function (res) {
+      var done = false;
+      call('hub', 'caps', []).then(function (c) { done = true; res(c || {}); }, function () { done = true; res({}); });
+      setTimeout(function () { if (!done) res({}); }, 12000);
+    });
+    return capsP;
+  }
+  var api = {
+    use: function (name) {
+      return caps().then(function (c) {
+        if (!c[name]) return null;
+        if (name === 'db') return { doc: docRef, collection: function (p) { return colRef(p); } };
+        if (name === 'user') return {
+          id: function () { return call('user', 'id', []); },
+          isOwner: function () { return false; }, canEdit: function () { return false; }, can: function () { return null; }
+        };
+        if (name === 'sample') {
+          var f = function (input, opts) { return call('sample', 'text', [input, plainOpts(opts)]); };
+          f.json = function (input, opts) { return call('sample', 'json', [input, plainOpts(opts)]); };
+          f.limits = function () { return call('sample', 'limits', []); };
+          return f;
+        }
+        if (name === 'downloads') return { save: function (r) { return call('downloads', 'save', [{ filename: r.filename, data: r.data }]); } };
+        return null;
+      });
+    }
+  };
+  // 도구 코드는 허브 전용 이름(__hubClaude)으로만 기능을 찾는다 — 화면에 다른 claude 객체가 끼어들어도 영향 없음
+  window.__hubClaude = api;
+})();
+</script>
+</head>
+<body>
+<title>우리집 가계부</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --paper:#FAFAFB;
+    --paper-line:#E7E7EA;
+    --ink:#1D1F24;
+    --ink-soft:#68707B;
+    --muted:#9AA0AA;
+    --income:#2E9E52;
+    --income-bg:#E5F5EA;
+    --expense:#D64545;
+    --expense-bg:#FBEAEA;
+    --recurring:#D9509A;
+    --recurring-bg:#FBE8F3;
+    --installment:#E08A34;
+    --installment-bg:#FDEEE0;
+    --card:#FFFFFF;
+    --accent:#7C8792;
+    --gold:#D7DBDF;
+    --hero-1:#2C2F34;
+    --hero-2:#101114;
+    --radius:16px;
+    --shadow:0 4px 18px rgba(20,20,25,0.08);
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:
+      radial-gradient(900px 560px at 10% -8%, rgba(44,47,52,0.08), transparent 62%),
+      radial-gradient(760px 480px at 108% 6%, rgba(180,186,193,0.14), transparent 58%),
+      radial-gradient(700px 480px at 90% 55%, rgba(44,47,52,0.05), transparent 60%),
+      radial-gradient(760px 520px at 8% 92%, rgba(16,17,20,0.06), transparent 60%),
+      linear-gradient(165deg, #FBF9FA 0%, #F8F6F7 45%, #F4F2F3 100%);
+    background-color:var(--paper);
+    background-attachment:scroll;
+    color:var(--ink);
+    font-family:'Pretendard','Apple SD Gothic Neo','Malgun Gothic',-apple-system,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    min-height:100vh;
+    padding-bottom:100px;
+  }
+  .wrap{max-width:480px;margin:0 auto;padding:0 16px;}
+
+  /* header */
+  .topbar{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:20px 0 6px;
+  }
+  .brand{display:flex;align-items:baseline;gap:6px;}
+  .brand .mark{font-size:20px;}
+  .brand h1{font-size:18px;font-weight:800;letter-spacing:-0.2px;margin:0;}
+  .top-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;}
+  .icon-btn{
+    background:var(--card);border:1px solid var(--paper-line);
+    border-radius:50%;width:32px;height:32px;font-size:14px;
+    cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;
+  }
+  .sync-chip{font-size:11px;color:var(--muted);white-space:nowrap;}
+  .who-chip{
+    font-size:12px;color:var(--ink-soft);
+    background:var(--card);border:1px solid var(--paper-line);
+    border-radius:999px;padding:5px 12px;cursor:pointer;
+    display:flex;align-items:center;gap:4px;
+  }
+
+  /* passbook hero */
+  .passbook{
+    background:linear-gradient(155deg, var(--hero-1) 0%, var(--hero-2) 100%);
+    background-image:
+      linear-gradient(112deg,
+        rgba(255,255,255,0) 0%,
+        rgba(255,255,255,0.10) 18%,
+        rgba(255,255,255,0) 30%,
+        rgba(255,255,255,0.05) 45%,
+        rgba(255,255,255,0) 58%,
+        rgba(255,255,255,0.08) 75%,
+        rgba(255,255,255,0) 90%),
+      repeating-linear-gradient(115deg, rgba(255,255,255,0.02) 0px, rgba(255,255,255,0.02) 1px, transparent 1px, transparent 14px),
+      linear-gradient(155deg, var(--hero-1) 0%, var(--hero-2) 100%);
+    color:#F1F1F3;
+    border-radius:var(--radius);
+    padding:22px 20px 18px;
+    margin-top:10px;
+    border:1px solid rgba(255,255,255,0.08);
+    box-shadow:0 10px 28px rgba(16,17,20,0.32);
+    position:relative;
+    overflow:hidden;
+  }
+  .passbook::before{
+    content:"";
+    position:absolute; right:-30px; top:-30px;
+    width:140px;height:140px;border-radius:50%;
+    background:radial-gradient(circle, rgba(215,219,223,0.28), transparent 70%);
+  }
+  .passbook .label{font-size:11px;color:#A8AEB6;letter-spacing:1.5px;text-transform:uppercase;}
+  .chip-icon{
+    width:34px;height:24px;border-radius:5px;margin-bottom:12px;
+    background:linear-gradient(135deg, #E4E7EB, #B9C0C7 45%, #E4E7EB);
+    position:relative;
+  }
+  .chip-icon::before, .chip-icon::after{
+    content:"";position:absolute;background:rgba(20,20,22,0.25);
+  }
+  .chip-icon::before{left:0;right:0;top:50%;height:1px;transform:translateY(-50%);}
+  .chip-icon::after{top:0;bottom:0;left:50%;width:1px;transform:translateX(-50%);}
+  .passbook .balance{
+    font-size:34px;font-weight:800;margin-top:4px;
+    font-variant-numeric:tabular-nums;
+    letter-spacing:-0.5px;
+  }
+  .passbook .balance small{font-size:16px;font-weight:600;margin-left:4px;color:#A8AEB6;}
+  .month-nav{
+    display:flex;align-items:center;justify-content:space-between;
+    margin-top:16px;
+    border-top:1px dashed rgba(215,219,223,0.30);
+    padding-top:14px;
+  }
+  .month-nav button{
+    background:rgba(255,255,255,0.08);border:none;color:#F1F1F3;
+    width:30px;height:30px;border-radius:50%;font-size:14px;cursor:pointer;
+  }
+  .month-nav .m-label{font-size:14px;font-weight:700;}
+  .month-io{display:flex;gap:14px;margin-top:12px;}
+  .month-io .item{flex:1;}
+  .month-io .item .t{font-size:11px;color:#A8AEB6;}
+  .month-io .item .v{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:2px;}
+  .month-io .item.in .v{color:#7BD99A;}
+  .month-io .item.out .v{color:#F09999;}
+
+  /* category bars */
+  .section-title{
+    font-size:13px;font-weight:700;color:var(--ink-soft);
+    margin:22px 2px 10px;display:flex;align-items:center;justify-content:space-between;
+  }
+  .cat-card{
+    background:var(--card);border-radius:var(--radius);
+    padding:14px 16px;box-shadow:var(--shadow);
+  }
+  .cat-row{display:flex;align-items:center;gap:10px;padding:6px 0;font-size:13px;}
+  .cat-row .name{width:64px;flex-shrink:0;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .cat-row .bar-bg{flex:1;background:#EEEEF0;border-radius:6px;height:8px;overflow:hidden;}
+  .cat-row .bar-fg{height:100%;border-radius:6px;background:var(--expense);}
+  .cat-row .amt{width:70px;text-align:right;font-variant-numeric:tabular-nums;font-weight:600;flex-shrink:0;}
+  .sub-breakdown{padding:2px 0 6px 14px;border-left:2px solid var(--paper-line);margin:-2px 0 6px 6px;}
+  .cat-row.sub-row{padding:3px 0;}
+  .cat-row.sub-row .name{color:var(--muted);font-size:12.5px;}
+  .cat-row.sub-row .amt{font-size:12.5px;font-weight:500;color:var(--ink-soft);}
+  .empty-cat{color:var(--muted);font-size:13px;text-align:center;padding:10px 0;}
+  .paymethod-meta{font-size:11px;color:var(--muted);margin:1px 0 10px 2px;}
+
+  /* entry list */
+  .day-group{margin-bottom:4px;}
+  .day-head{
+    font-size:12px;color:var(--muted);font-weight:700;
+    padding:14px 2px 6px;
+  }
+  .entry{
+    background:var(--card);border-radius:12px;
+    padding:12px 14px;margin-bottom:8px;box-shadow:var(--shadow);
+    display:flex;align-items:center;gap:10px;cursor:pointer;
+  }
+  .entry .tag{
+    font-size:11px;padding:4px 8px;border-radius:8px;font-weight:700;
+    flex-shrink:0;
+  }
+  .entry.expense .tag{background:var(--expense-bg);color:var(--expense);}
+  .entry.income .tag{background:var(--income-bg);color:var(--income);}
+  .entry.expense.recurring .tag{background:var(--recurring-bg);color:var(--recurring);}
+  .entry.expense.installment .tag{background:var(--installment-bg);color:var(--installment);}
+  .entry .mid{flex:1;min-width:0;}
+  .entry .memo{font-size:14px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .entry .payer{font-size:11.5px;color:var(--muted);margin-top:1px;}
+  .entry .amt{font-size:15px;font-weight:800;font-variant-numeric:tabular-nums;flex-shrink:0;}
+  .entry.expense .amt{color:var(--expense);}
+  .entry.income .amt{color:var(--income);}
+  .entry.expense.recurring .amt{color:var(--recurring);}
+  .entry.expense.installment .amt{color:var(--installment);}
+
+  .empty-state{
+    text-align:center;padding:50px 20px;color:var(--muted);
+  }
+  .empty-state .big{font-size:32px;margin-bottom:8px;}
+  .empty-state .small{font-size:13px;margin-top:4px;}
+
+  /* fab */
+  .fab{
+    position:fixed;bottom:calc(24px + env(safe-area-inset-bottom, 0px));left:50%;transform:translateX(-50%);
+    width:56px;height:56px;border-radius:50%;
+    background:linear-gradient(155deg, var(--hero-1), var(--hero-2));color:#fff;font-size:26px;
+    border:none;box-shadow:0 8px 20px rgba(16,17,20,0.38);
+    display:flex;align-items:center;justify-content:center;cursor:pointer;
+    z-index:50;
+  }
+  .fab-sms{
+    position:fixed;bottom:calc(30px + env(safe-area-inset-bottom, 0px));right:16px;
+    background:var(--gold);color:#22252B;border:none;
+    font-size:13px;font-weight:700;padding:10px 14px;border-radius:999px;
+    box-shadow:0 6px 14px rgba(124,135,146,0.4);cursor:pointer;
+    z-index:50;
+  }
+  .fab-upload{
+    position:fixed;bottom:calc(30px + env(safe-area-inset-bottom, 0px));left:16px;
+    background:var(--ink-soft);color:#fff;border:none;
+    font-size:13px;font-weight:700;padding:10px 14px;border-radius:999px;
+    box-shadow:0 6px 14px rgba(34,40,59,0.25);cursor:pointer;
+    z-index:50;
+  }
+  .file-drop{
+    border:2px dashed var(--paper-line);border-radius:12px;
+    padding:24px 16px;text-align:center;background:var(--card);
+    cursor:pointer;display:block;margin-bottom:10px;
+  }
+  .file-drop input{display:none;}
+  .cleanup-box{
+    background:#F2F2F4;border:1px solid var(--paper-line);border-radius:12px;
+    padding:14px;margin-bottom:18px;
+  }
+  .file-drop .icon{font-size:28px;}
+  .file-drop .txt{font-size:13px;color:var(--ink-soft);margin-top:6px;}
+  .preview-table{margin-top:14px;max-height:44vh;overflow-y:auto;}
+  .preview-row{
+    display:flex;align-items:center;gap:8px;
+    background:var(--card);border-radius:10px;padding:10px 12px;margin-bottom:6px;
+  }
+  .preview-row input[type=checkbox]{width:18px;height:18px;flex-shrink:0;}
+  .preview-row .pinfo{flex:1;min-width:0;}
+  .preview-row .pmemo{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .preview-row .pdate{font-size:11px;color:var(--muted);}
+  .preview-row .pamt{font-size:13.5px;font-weight:700;color:var(--expense);flex-shrink:0;font-variant-numeric:tabular-nums;}
+  .preview-row select{
+    font-size:12px;border:1px solid var(--paper-line);border-radius:8px;padding:5px 6px;
+    background:#fff;color:var(--ink-soft);flex-shrink:0;max-width:84px;
+  }
+  .upload-summary{font-size:13px;color:var(--ink-soft);margin:10px 2px 0;}
+  .sms-textarea{
+    width:100%;min-height:120px;border:1px solid var(--paper-line);
+    background:var(--card);border-radius:10px;padding:12px;font-size:14px;
+    font-family:inherit;resize:vertical;
+  }
+  .sms-hint{font-size:12px;color:var(--muted);margin-top:6px;line-height:1.5;}
+  .sms-preview{
+    background:var(--card);border:1px dashed var(--paper-line);border-radius:10px;
+    padding:12px;margin-top:12px;font-size:13px;color:var(--ink-soft);display:none;
+  }
+  .sms-preview.show{display:block;}
+  .sms-preview b{color:var(--ink);}
+
+  .catlist{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;}
+  .cat-manage-item{
+    display:inline-flex;align-items:center;gap:4px;
+    background:var(--card);border:1px solid var(--paper-line);border-radius:999px;
+    padding:7px 6px 7px 13px;font-size:13px;color:var(--ink);
+  }
+  .cat-del{background:transparent;border:none;color:var(--muted);font-size:16px;cursor:pointer;line-height:1;padding:0 4px;}
+  .cat-manage-label{cursor:pointer;}
+
+  .recur-item{
+    display:flex;align-items:center;gap:10px;
+    background:var(--card);border-radius:12px;padding:11px 13px;margin-bottom:8px;box-shadow:var(--shadow);
+  }
+  .recur-item .mid{flex:1;min-width:0;}
+  .recur-item .name{font-size:14px;font-weight:700;}
+  .recur-item .meta{font-size:11.5px;color:var(--muted);margin-top:2px;}
+  .recur-item .amt{font-size:14px;font-weight:800;flex-shrink:0;}
+  .recur-item.expense .amt{color:var(--expense);}
+  .recur-item.income .amt{color:var(--income);}
+  .recur-item .del{background:transparent;border:none;color:var(--muted);font-size:16px;cursor:pointer;flex-shrink:0;}
+  .switch{position:relative;width:38px;height:22px;flex-shrink:0;display:inline-block;}
+  .switch input{opacity:0;width:0;height:0;position:absolute;}
+  .switch .slider{position:absolute;inset:0;background:#DADADD;border-radius:999px;transition:.15s;cursor:pointer;}
+  .switch .slider::before{content:"";position:absolute;width:16px;height:16px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.15s;}
+  .switch input:checked + .slider{background:var(--income);}
+  .switch input:checked + .slider::before{transform:translateX(16px);}
+  .day-suffix{font-size:13px;color:var(--ink-soft);margin-left:8px;}
+  .day-field{display:flex;align-items:center;}
+  .day-field input{width:80px;}
+
+  .ip-item{
+    background:var(--card);border-radius:12px;padding:12px 14px;margin-bottom:8px;box-shadow:var(--shadow);
+  }
+  .ip-item .ip-top{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+  .ip-item .ip-name{font-size:14px;font-weight:700;}
+  .ip-item .ip-meta{font-size:11.5px;color:var(--muted);margin-top:2px;}
+  .ip-item .ip-amt{font-size:14px;font-weight:800;color:var(--expense);flex-shrink:0;}
+  .ip-item .ip-del{background:transparent;border:none;color:var(--muted);font-size:15px;cursor:pointer;flex-shrink:0;margin-left:6px;}
+  .ip-progress-bg{background:#EEEEF0;border-radius:6px;height:6px;overflow:hidden;margin-top:8px;}
+  .ip-progress-fg{height:100%;border-radius:6px;background:var(--gold);}
+  .ip-badge{
+    font-size:10.5px;padding:2px 7px;border-radius:6px;font-weight:700;margin-left:6px;
+  }
+  .ip-badge.done{background:var(--income-bg);color:var(--income);}
+  .ip-badge.active{background:var(--expense-bg);color:var(--expense);}
+
+  .view-toggle{display:flex;background:#EEEEF0;border-radius:8px;padding:2px;}
+  .vtab{border:none;background:transparent;font-size:11.5px;padding:5px 10px;border-radius:6px;color:var(--ink-soft);cursor:pointer;font-weight:700;}
+  .vtab.on{background:var(--card);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,0.08);}
+
+  .calendar{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;}
+  .cal-weekday{font-size:11px;color:var(--muted);text-align:center;padding-bottom:6px;font-weight:700;}
+  .cal-cell{
+    background:var(--card);border-radius:8px;padding:5px 3px;min-height:52px;
+    font-size:10.5px;cursor:pointer;box-shadow:var(--shadow);
+    display:flex;flex-direction:column;align-items:center;gap:1px;
+  }
+  .cal-cell.empty{background:transparent;box-shadow:none;cursor:default;}
+  .cal-cell.today .cal-day-num{color:#454B52;font-weight:800;}
+  .cal-cell.selected{background:var(--ink);}
+  .cal-day-num{font-weight:700;font-size:11.5px;color:var(--ink);}
+  .cal-cell.selected .cal-day-num{color:#fff;}
+  .cal-amt{font-variant-numeric:tabular-nums;line-height:1.3;}
+  .cal-amt.expense{color:var(--expense);}
+  .cal-amt.income{color:var(--income);}
+  .cal-cell.selected .cal-amt.expense{color:#F09999;}
+  .cal-cell.selected .cal-amt.income{color:#7BD99A;}
+
+  /* sheet / modal */
+  .overlay{
+    position:fixed;inset:0;background:rgba(20,22,32,0.45);
+    display:none;align-items:flex-end;justify-content:center;z-index:100;
+  }
+  .overlay.show{display:flex;}
+  .sheet{
+    background:var(--paper);width:100%;max-width:480px;
+    border-radius:20px 20px 0 0;padding:18px 18px 26px;
+    max-height:88vh;overflow-y:auto;
+    padding-bottom:calc(26px + env(safe-area-inset-bottom, 0px));
+    animation:up .18s ease-out;
+  }
+  @keyframes up{from{transform:translateY(30px);opacity:0;}to{transform:translateY(0);opacity:1;}}
+  .sheet h2{font-size:16px;margin:2px 0 16px;font-weight:800;}
+  .seg{display:flex;background:#EEEEF0;border-radius:10px;padding:3px;margin-bottom:14px;}
+  .seg button{
+    flex:1;border:none;background:transparent;padding:9px 0;border-radius:8px;
+    font-size:14px;font-weight:700;color:var(--ink-soft);cursor:pointer;
+  }
+  .seg button.on{background:var(--card);color:var(--ink);box-shadow:0 1px 4px rgba(0,0,0,0.08);}
+  .field{margin-bottom:14px;}
+  .field label{display:block;font-size:12px;color:var(--ink-soft);margin-bottom:6px;font-weight:600;}
+  .field input, .field select, .field textarea{
+    width:100%;border:1px solid var(--paper-line);background:var(--card);
+    border-radius:10px;padding:11px 12px;font-size:15px;color:var(--ink);
+    font-family:inherit;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus{outline:2px solid var(--gold);}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;}
+  .chip{
+    padding:8px 13px;border-radius:999px;border:1px solid var(--paper-line);
+    background:var(--card);font-size:13px;color:var(--ink-soft);cursor:pointer;
+  }
+  .chip.on{background:var(--ink);color:#fff;border-color:var(--ink);}
+  .btn-row{display:flex;gap:10px;margin-top:6px;}
+  .btn{
+    flex:1;border:none;border-radius:10px;padding:13px 0;font-size:15px;font-weight:700;cursor:pointer;
+  }
+  .btn.primary{background:var(--ink);color:#fff;}
+  .btn.ghost{background:transparent;color:var(--expense);}
+  .btn.secondary{background:#EEEEF0;color:var(--ink-soft);}
+
+  a.sr{color:inherit;}
+  .toast{
+    position:fixed;bottom:calc(96px + env(safe-area-inset-bottom, 0px));left:50%;transform:translateX(-50%);
+    background:var(--ink);color:#fff;padding:10px 18px;border-radius:999px;
+    font-size:13px;opacity:0;transition:opacity .25s;z-index:200;pointer-events:none;
+  }
+  .toast.show{opacity:1;}
+</style>
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand"><span class="mark">🏡</span><h1>우리집 가계부</h1></div>
+    <div class="top-actions">
+      <button class="icon-btn" id="btnCatManage" title="카테고리 관리">🏷️</button>
+      <button class="icon-btn" id="btnRecurManage" title="고정비 관리">🔁</button>
+      <button class="icon-btn" id="btnCardManage" title="카드 관리">💳</button>
+      <button class="icon-btn" id="btnAccountManage" title="통장 관리">🏦</button>
+      <button class="icon-btn" id="btnBackup" title="백업/복원">💾</button>
+      <button class="icon-btn" id="btnInstallmentManage" title="할부 관리">🧾</button>
+      <button class="icon-btn" id="btnBulkEdit" title="내역 일괄 수정">🔍</button>
+      <div class="who-chip" id="whoChip">나: 설정 필요</div>
+      <span class="sync-chip" id="syncChip"></span>
+    </div>
+  </div>
+
+  <div class="passbook">
+    <div class="chip-icon"></div>
+    <div class="label">현재 잔액</div>
+    <div class="balance" id="totalBalance">0<small>원</small></div>
+    <div class="month-nav">
+      <button id="prevMonth">‹</button>
+      <div class="m-label" id="monthLabel">2026년 7월</div>
+      <button id="nextMonth">›</button>
+    </div>
+    <div class="month-io">
+      <div class="item in"><div class="t">이번 달 수입</div><div class="v" id="monthIncome">0원</div></div>
+      <div class="item out"><div class="t">이번 달 지출</div><div class="v" id="monthExpense">0원</div></div>
+    </div>
+  </div>
+
+  <div class="section-title">카테고리별 지출</div>
+  <div class="cat-card" id="catCard"></div>
+
+  <div class="section-title">현금&카드별 지출</div>
+  <div class="chips" id="methodFilterChips" style="margin-bottom:10px;"></div>
+  <div class="cat-card" id="cardSummaryCard"></div>
+
+  <div class="section-title">통장 잔액</div>
+  <div class="cat-card" id="accountBalanceCard"></div>
+
+  <div class="section-title">
+    <span>내역</span>
+    <div class="view-toggle">
+      <button id="viewList" class="vtab on">리스트</button>
+      <button id="viewCalendar" class="vtab">캘린더</button>
+    </div>
+  </div>
+  <div id="calendarSection" style="display:none;">
+    <div class="calendar" id="calendarGrid"></div>
+    <div id="dayPanel" style="margin-top:14px;"></div>
+  </div>
+  <div id="entryList"></div>
+</div>
+
+<button class="fab-upload" id="fabUpload">📄 내역서 업로드</button>
+<button class="fab-sms" id="fabSms">📩 문자로 추가</button>
+<button class="fab" id="fabAdd">+</button>
+
+<!-- Add/Edit Sheet -->
+<div class="overlay" id="entryOverlay">
+  <div class="sheet">
+    <h2 id="sheetTitle">내역 추가</h2>
+    <div class="seg">
+      <button id="segExpense" class="on">지출</button>
+      <button id="segIncome">수입</button>
+    </div>
+    <div class="field">
+      <label>금액</label>
+      <input type="number" inputmode="numeric" id="fAmount" placeholder="0">
+    </div>
+    <div class="field">
+      <label>날짜</label>
+      <input type="date" id="fDate">
+    </div>
+    <div class="field" id="methodField">
+      <label>결제수단</label>
+      <div class="seg" id="methodSeg">
+        <button id="segCash" class="on">현금</button>
+        <button id="segCard">카드</button>
+      </div>
+      <div id="cardField" style="display:none;margin-top:10px;">
+        <div class="chips" id="fCardChips"></div>
+      </div>
+    </div>
+    <div class="field" id="accountField" style="display:none;">
+      <label>입금 통장 (선택)</label>
+      <div class="chips" id="fAccountChips"></div>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <input type="text" id="quickAccountInput" placeholder="새 통장 이름 입력">
+        <button class="btn secondary" id="quickAccountAdd" style="flex:0 0 64px;padding:0;">추가</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>카테고리</label>
+      <div class="chips" id="fCategoryChips"></div>
+      <div class="chips" id="fSubCategoryChips" style="display:none;margin-top:8px;"></div>
+    </div>
+    <div class="field">
+      <label>메모</label>
+      <input type="text" id="fMemo" placeholder="예: 이마트 장보기">
+    </div>
+    <div class="field">
+      <label>작성자</label>
+      <input type="text" id="fPayer" placeholder="이름">
+    </div>
+    <div class="btn-row">
+      <button class="btn ghost" id="fDelete" style="display:none;">삭제</button>
+      <button class="btn secondary" id="fCancel">취소</button>
+      <button class="btn primary" id="fSave">저장</button>
+    </div>
+  </div>
+</div>
+
+<!-- Upload Sheet -->
+<div class="overlay" id="uploadOverlay">
+  <div class="sheet">
+    <h2>카드 이용내역서 업로드</h2>
+    <div id="uploadCleanupSection" class="cleanup-box">
+      <div class="sms-hint" style="margin-top:0;">전에 올렸던 업로드 내역을 정리하고 업데이트된 방식으로 다시 올리고 싶다면:</div>
+      <div class="btn-row" style="margin-top:10px;">
+        <button class="btn ghost" id="btnDeleteUploaded">업로드했던 내역 모두 삭제</button>
+      </div>
+      <div id="deleteUploadedConfirm" style="display:none;margin-top:10px;">
+        <div class="sms-hint" id="deleteUploadedSummary" style="margin-top:0;color:var(--expense);font-weight:700;"></div>
+        <div class="btn-row" style="margin-top:10px;">
+          <button class="btn secondary" id="deleteUploadedCancel">취소</button>
+          <button class="btn primary" id="deleteUploadedConfirmBtn">확인, 삭제</button>
+        </div>
+      </div>
+    </div>
+    <div id="uploadStep1">
+      <label class="file-drop" for="uploadFile">
+        <div class="icon">📄</div>
+        <div class="txt">엑셀(.xlsx/.xls) 또는 CSV 파일을 선택하세요<br>카드사 홈페이지 &rarr; 이용내역 조회 &rarr; 엑셀 다운로드</div>
+        <input type="file" id="uploadFile" accept=".xlsx,.xls,.csv">
+      </label>
+      <div class="sms-hint">PDF 명세서는 아직 지원하지 않아요. 카드사 사이트에서 엑셀/CSV로 다운로드해주세요.</div>
+    </div>
+    <div id="uploadStep2" style="display:none;">
+      <div class="upload-summary" id="uploadSummary"></div>
+      <div class="field" id="uploadCardField" style="margin-top:10px;">
+        <label>이 내역서의 카드</label>
+        <div class="chips" id="uploadCardChips"></div>
+      </div>
+      <div class="preview-table" id="previewTable"></div>
+    </div>
+    <div class="btn-row">
+      <button class="btn secondary" id="uploadCancel">취소</button>
+      <button class="btn primary" id="uploadConfirm" style="display:none;">선택 항목 추가</button>
+    </div>
+  </div>
+</div>
+
+<!-- SMS Paste Sheet -->
+<div class="overlay" id="smsOverlay">
+  <div class="sheet">
+    <h2>카드 문자로 자동 추가</h2>
+    <div class="field">
+      <label>카드사 문자 붙여넣기</label>
+      <textarea class="sms-textarea" id="smsText" placeholder="예)
+KB국민카드승인
+07/01 12:34
+23,000원 일시불
+스타벅스 강남점
+누적1,234,567원"></textarea>
+      <div class="sms-hint">문자 알림을 길게 눌러 복사한 뒤 여기에 붙여넣으세요. 금액·날짜·가맹점을 자동으로 읽어서 지출 입력창에 채워드려요. 카드사마다 문자 형식이 달라 완벽하지 않을 수 있으니 저장 전에 꼭 확인해주세요.</div>
+    </div>
+    <div class="sms-preview" id="smsPreview"></div>
+    <div class="btn-row">
+      <button class="btn secondary" id="smsCancel">취소</button>
+      <button class="btn primary" id="smsAnalyze">분석하기</button>
+    </div>
+  </div>
+</div>
+
+<!-- Category Manage Sheet -->
+<div class="overlay" id="catOverlay">
+  <div class="sheet">
+    <h2>카테고리 관리</h2>
+    <div class="seg">
+      <button id="catTabExpense" class="on">지출 카테고리</button>
+      <button id="catTabIncome">수입 카테고리</button>
+    </div>
+    <div class="sms-hint">지출 카테고리 이름을 탭하면 하위 카테고리를 관리할 수 있어요.</div>
+    <div class="catlist" id="catManageList" style="margin-top:10px;"></div>
+    <div class="field">
+      <label>새 카테고리 추가</label>
+      <div style="display:flex;gap:8px;">
+        <input type="text" id="newCatInput" placeholder="예: 반려동물" style="flex:1;">
+        <button class="btn primary" id="addCatBtn" style="flex:0 0 72px;">추가</button>
+      </div>
+    </div>
+    <div id="subCatSection" class="cleanup-box">
+      <div class="section-title" style="margin-top:0;">하위 카테고리 관리</div>
+      <div class="field">
+        <label>상위 카테고리</label>
+        <div class="chips" id="subCatParentChips"></div>
+      </div>
+      <div class="catlist" id="subCatList"></div>
+      <div class="field" style="margin-bottom:0;">
+        <label>하위 카테고리 추가</label>
+        <div style="display:flex;gap:8px;">
+          <input type="text" id="newSubCatInput" placeholder="예: 주유비" style="flex:1;">
+          <button class="btn secondary" id="addSubCatBtn" style="flex:0 0 72px;">추가</button>
+        </div>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn secondary" id="catClose">닫기</button>
+    </div>
+  </div>
+</div>
+
+<!-- Recurring Manage Sheet -->
+<div class="overlay" id="recurOverlay">
+  <div class="sheet">
+    <h2>고정비 관리</h2>
+    <div id="recurList"></div>
+    <div class="section-title" style="margin-top:18px;">고정비 추가</div>
+    <div class="seg">
+      <button id="rSegExpense" class="on">지출</button>
+      <button id="rSegIncome">수입</button>
+    </div>
+    <div class="field">
+      <label>이름</label>
+      <input type="text" id="rName" placeholder="예: 월세, 넷플릭스, 급여">
+    </div>
+    <div class="field">
+      <label>금액</label>
+      <input type="number" inputmode="numeric" id="rAmount" placeholder="0">
+    </div>
+    <div class="field">
+      <label>매월 며칠</label>
+      <div class="day-field">
+        <input type="number" id="rDay" min="1" max="31" value="1">
+        <span class="day-suffix">일에 자동 등록</span>
+      </div>
+    </div>
+    <div class="field">
+      <label>카테고리</label>
+      <div class="chips" id="rCategoryChips"></div>
+    </div>
+    <div class="field">
+      <label>작성자</label>
+      <input type="text" id="rPayer" placeholder="이름">
+    </div>
+    <div class="btn-row">
+      <button class="btn secondary" id="recurClose">닫기</button>
+      <button class="btn primary" id="rSave">고정비 추가</button>
+    </div>
+  </div>
+</div>
+
+<!-- Card Manage Sheet -->
+<div class="overlay" id="cardOverlay">
+  <div class="sheet">
+    <h2>카드 관리</h2>
+    <div class="sms-hint">카드 이름을 탭하면 결제일·이용기간을 입력/수정할 수 있어요.</div>
+    <div class="catlist" id="cardManageList" style="margin-top:10px;"></div>
+    <div class="field">
+      <label id="cardFormLabel">새 카드 추가</label>
+      <input type="text" id="cardMgmtInput" placeholder="예: 신한카드, 국민카드">
+    </div>
+    <div class="field">
+      <label>결제일 (매월, 선택)</label>
+      <div class="day-field">
+        <input type="number" id="cardMgmtPayDay" min="1" max="31" placeholder="예: 15">
+        <span class="day-suffix">일</span>
+      </div>
+    </div>
+    <div class="field">
+      <label>이용기간 시작 (선택)</label>
+      <div style="display:flex;gap:8px;">
+        <select id="cardMgmtCycleStartOffset" style="flex:1;">
+          <option value="-2">전전월</option>
+          <option value="-1">전월</option>
+          <option value="0">당월</option>
+        </select>
+        <input type="number" id="cardMgmtCycleStartDay" min="1" max="31" placeholder="일" style="flex:0 0 90px;">
+      </div>
+    </div>
+    <div class="field">
+      <label>이용기간 종료 (선택)</label>
+      <div style="display:flex;gap:8px;">
+        <select id="cardMgmtCycleEndOffset" style="flex:1;">
+          <option value="-2">전전월</option>
+          <option value="-1">전월</option>
+          <option value="0">당월</option>
+        </select>
+        <input type="number" id="cardMgmtCycleEndDay" min="1" max="31" placeholder="일" style="flex:0 0 90px;">
+      </div>
+      <div class="sms-hint">"당월"은 결제일이 속한 달이에요. 예: 결제일이 이번달 15일이고 이용기간이 전월 6일~당월 5일이면, 지난달 6일부터 이번달 5일까지 쓴 금액이라는 뜻이에요.</div>
+    </div>
+    <div class="btn-row">
+      <button class="btn secondary" id="cardMgmtCancelEdit" style="display:none;">취소</button>
+      <button class="btn primary" id="cardMgmtAdd">추가</button>
+    </div>
+    <div class="btn-row">
+      <button class="btn secondary" id="cardClose">닫기</button>
+    </div>
+  </div>
+</div>
+
+<!-- Account Manage Sheet -->
+<div class="overlay" id="accountOverlay">
+  <div class="sheet">
+    <h2>통장 관리</h2>
+    <div class="catlist" id="accountManageList"></div>
+    <div class="field">
+      <label>새 통장 추가</label>
+      <div style="display:flex;gap:8px;">
+        <input type="text" id="accountMgmtInput" placeholder="예: 국민은행 주거래, 카카오뱅크 비상금">
+        <button class="btn primary" id="accountMgmtAdd" style="flex:0 0 72px;">추가</button>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn secondary" id="accountClose">닫기</button>
+    </div>
+  </div>
+</div>
+
+<!-- Account Detail (balance breakdown + withdrawals) Sheet -->
+<div class="overlay" id="accountDetailOverlay">
+  <div class="sheet">
+    <h2 id="accountDetailTitle">통장</h2>
+    <div class="upload-summary" id="accountDetailSummary"></div>
+    <div class="section-title" style="margin-top:16px;">출금(지출) 내역</div>
+    <div id="accountTxList"></div>
+    <div class="section-title" style="margin-top:16px;">출금 기록 추가</div>
+    <div class="field">
+      <label>금액</label>
+      <input type="number" inputmode="numeric" id="txAmount" placeholder="0">
+    </div>
+    <div class="field">
+      <label>날짜</label>
+      <input type="date" id="txDate">
+    </div>
+    <div class="field">
+      <label>메모</label>
+      <input type="text" id="txMemo" placeholder="예: 이체, 현금 인출">
+    </div>
+    <div class="btn-row">
+      <button class="btn secondary" id="accountDetailClose">닫기</button>
+      <button class="btn primary" id="txSave">출금 기록 추가</button>
+    </div>
+  </div>
+</div>
+
+<!-- Backup / Restore Sheet -->
+<div class="overlay" id="backupOverlay">
+  <div class="sheet">
+    <h2>데이터 백업 / 복원</h2>
+    <div class="seg">
+      <button id="backupTabExport" class="on">내보내기</button>
+      <button id="backupTabImport">가져오기</button>
+    </div>
+    <div id="backupExportPanel">
+      <div class="sms-hint">아래 내용을 전체 복사해서 메모장이나 노트 앱 등 안전한 곳에 보관해두세요. 나중에 "가져오기" 탭에 붙여넣으면 복원할 수 있어요.</div>
+      <textarea class="sms-textarea" id="backupExportText" style="min-height:200px;margin-top:10px;" readonly></textarea>
+      <div class="btn-row">
+        <button class="btn primary" id="backupCopyBtn">전체 복사</button>
+      </div>
+    </div>
+    <div id="backupImportPanel" style="display:none;">
+      <div class="sms-hint">백업해둔 내용을 아래에 붙여넣고 복원하세요. ⚠️ 복원하면 현재 데이터는 사라지고 백업 내용으로 덮어써져요.</div>
+      <textarea class="sms-textarea" id="backupImportText" style="min-height:200px;margin-top:10px;" placeholder="백업해둔 내용 붙여넣기"></textarea>
+      <div class="btn-row">
+        <button class="btn ghost" id="backupImportBtn">복원하기</button>
+      </div>
+      <div id="backupConfirmRow" style="display:none;margin-top:12px;">
+        <div class="sms-hint" style="color:var(--expense);font-weight:700;">정말 덮어쓸까요? 현재 데이터는 되돌릴 수 없어요.</div>
+        <div class="btn-row">
+          <button class="btn secondary" id="backupCancelConfirm">취소</button>
+          <button class="btn primary" id="backupConfirmBtn">확인, 덮어쓰기</button>
+        </div>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn secondary" id="backupClose">닫기</button>
+    </div>
+  </div>
+</div>
+
+<!-- Installment Manage Sheet -->
+<div class="overlay" id="installmentOverlay">
+  <div class="sheet">
+    <h2>할부 관리</h2>
+    <div id="installmentList"></div>
+    <div class="section-title" style="margin-top:18px;">할부 등록</div>
+    <div class="field">
+      <label>품목명</label>
+      <input type="text" id="ipName" placeholder="예: 노트북, 냉장고">
+    </div>
+    <div class="field">
+      <label>총 할부금액</label>
+      <input type="number" inputmode="numeric" id="ipTotal" placeholder="0">
+    </div>
+    <div class="field">
+      <label>할부 개월수</label>
+      <input type="number" id="ipMonths" min="2" max="60" value="3">
+    </div>
+    <div class="field">
+      <label>첫 결제월</label>
+      <input type="month" id="ipStartMonth">
+    </div>
+    <div class="field">
+      <label>매월 결제일</label>
+      <div class="day-field">
+        <input type="number" id="ipDay" min="1" max="31" value="1">
+        <span class="day-suffix">일</span>
+      </div>
+    </div>
+    <div class="field">
+      <label>카드</label>
+      <div class="chips" id="ipCardChips"></div>
+    </div>
+    <div class="field">
+      <label>카테고리</label>
+      <div class="chips" id="ipCategoryChips"></div>
+    </div>
+    <div class="field">
+      <label>작성자</label>
+      <input type="text" id="ipPayer" placeholder="이름">
+    </div>
+    <div class="sms-hint">시작월이 이번 달보다 이전이면, 이미 지나간 회차들도 자동으로 내역에 채워져요.</div>
+    <div class="btn-row">
+      <button class="btn secondary" id="installmentClose">닫기</button>
+      <button class="btn primary" id="ipSave">할부 등록</button>
+    </div>
+  </div>
+</div>
+
+<!-- Bulk Edit Sheet -->
+<div class="overlay" id="bulkEditOverlay">
+  <div class="sheet">
+    <h2>내역 일괄 수정</h2>
+    <div class="sms-hint">메모에 특정 단어가 포함된 내역을 한 번에 찾아서 메모나 카테고리를 바꿀 수 있어요.</div>
+    <div class="field" style="margin-top:10px;">
+      <label>찾을 메모 (일부만 입력해도 돼요)</label>
+      <input type="text" id="bulkFindText" placeholder="예: 명일초등학교">
+    </div>
+    <div class="btn-row">
+      <button class="btn secondary" id="bulkSearchBtn">검색</button>
+    </div>
+    <div id="bulkSearchResult" style="margin-top:12px;"></div>
+    <div id="bulkEditForm" style="display:none;margin-top:6px;">
+      <div class="field">
+        <label>새 메모로 바꾸기 (선택, 비워두면 메모 유지)</label>
+        <input type="text" id="bulkNewMemo" placeholder="예: 사랑이 방과후">
+      </div>
+      <div class="field">
+        <label>카테고리 변경 (선택)</label>
+        <div class="chips" id="bulkCategoryChips"></div>
+        <div class="chips" id="bulkSubCategoryChips" style="display:none;margin-top:8px;"></div>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" id="bulkEditApply">일괄 적용</button>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn secondary" id="bulkEditClose">닫기</button>
+    </div>
+  </div>
+</div>
+
+<!-- Name Sheet -->
+<div class="overlay" id="nameOverlay">
+  <div class="sheet">
+    <h2>어떻게 불러드릴까요?</h2>
+    <div class="field">
+      <label>이름 (예: 남편, 아내, 지훈)</label>
+      <input type="text" id="nameInput" placeholder="이름 입력">
+    </div>
+    <div class="btn-row">
+      <button class="btn primary" id="nameSave">시작하기</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const DEFAULT_EXP_CATS = [
+  { name: '식비', subs: [] },
+  { name: '생활용품', subs: [] },
+  { name: '교통', subs: ['대중교통','주유비','주차비'] },
+  { name: '주거/통신', subs: [] },
+  { name: '문화/여가', subs: [] },
+  { name: '의료/건강', subs: [] },
+  { name: '교육', subs: [] },
+  { name: '경조사', subs: [] },
+  { name: '기타', subs: [] }
+];
+const DEFAULT_INC_CATS = ['급여','부수입','용돈','기타'];
+
+function expCatNames(){ return (data.expCats || []).map(c => c.name); }
+function findExpCat(name){ return (data.expCats || []).find(c => c.name === name); }
+function migrateExpCats(){
+  if(!Array.isArray(data.expCats) || data.expCats.length === 0){
+    data.expCats = DEFAULT_EXP_CATS.map(c => ({ name: c.name, subs: [...c.subs] }));
+    return;
+  }
+  data.expCats = data.expCats.map(c => typeof c === 'string' ? { name: c, subs: [] } : { name: c.name, subs: Array.isArray(c.subs) ? c.subs : [] });
+}
+
+const CATEGORY_KEYWORDS = {
+  '식비': ['스타벅스','커피','카페','투썸','이디야','메가커피','컴포즈','식당','분식','치킨','피자','버거','맘스터치','배달','요기요','배민','배달의민족','쿠팡이츠','국밥','김밥','고기','횟집','편의점','GS25','CU','세븐일레븐','이마트24','미니스톱','빵','베이커리','파리바게뜨','뚜레쥬르','떡','도시락'],
+  '생활용품': ['다이소','이마트','홈플러스','롯데마트','코스트코','올리브영','생활용품','마트'],
+  '교통': ['택시','카카오T','카카오모빌리티','버스','지하철','철도','코레일','SRT','KTX','주유','칼텍스','SK에너지','오일뱅크','에쓰오일','주차','통행료','하이패스'],
+  '문화/여가': ['영화','CGV','메가박스','롯데시네마','넷플릭스','왓챠','디즈니','유튜브','공연','전시','노래방','PC방','볼링','골프','여행','호텔','에어비앤비'],
+  '의료/건강': ['병원','약국','한의원','치과','피부과','헬스','필라테스','요가','정형외과','내과','안과'],
+  '주거/통신': ['SKT','KT','LG유플러스','SK텔레콤','통신','관리비','도시가스','한국전력','전기요금','수도요금','인터넷','월세','관리사무소'],
+  '교육': ['학원','서점','교보문고','알라딘','예스24','교재','인강','학습지'],
+  '경조사': ['축의금','조의금','상품권','화환']
+};
+
+function guessCategory(text, cats){
+  const t = (text||'').toLowerCase();
+  for(const cat of cats){
+    const keywords = CATEGORY_KEYWORDS[cat] || [];
+    if(keywords.some(k => t.includes(k.toLowerCase()))) return cat;
+  }
+  return null;
+}
+
+function parseSmsText(raw){
+  const text = (raw||'').trim();
+  const lines = text.split('\n').map(l=>l.trim()).filter(Boolean);
+
+  // amount: find number+원, skip ones preceded by 누적/잔액/한도/잔여
+  let amount = null;
+  const amtRegex = /([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{4,})\s*원/g;
+  let m;
+  while((m = amtRegex.exec(text)) !== null){
+    const before = text.slice(Math.max(0, m.index-8), m.index);
+    if(/누적|잔액|한도|잔여/.test(before)) continue;
+    amount = parseInt(m[1].replace(/,/g,''), 10);
+    break;
+  }
+
+  // date
+  let date = null;
+  const now = new Date();
+  let dm = text.match(/(\d{4})[.\-](\d{1,2})[.\-](\d{1,2})/);
+  if(dm){
+    date = `${dm[1]}-${pad(+dm[2])}-${pad(+dm[3])}`;
+  } else {
+    dm = text.match(/(\d{1,2})[\/.](\d{1,2})(?!\d)/);
+    if(dm){
+      date = `${now.getFullYear()}-${pad(+dm[1])}-${pad(+dm[2])}`;
+    }
+  }
+
+  // merchant: filter out noise lines
+  const noisePatterns = [
+    /원/, /승인/, /카드/, /발신/, /님$/, /님\s/, /누적/, /잔액/, /한도/,
+    /체크/, /일시불/, /할부/, /거절/, /취소/, /^\d{1,2}[\/.]\d{1,2}/, /^\d{4}[.\-]\d{1,2}[.\-]\d{1,2}/
+  ];
+  const candidates = lines.filter(l => !noisePatterns.some(p => p.test(l)));
+  let merchant = candidates.sort((a,b)=>b.length-a.length)[0] || '';
+
+  const category = guessCategory(merchant + ' ' + text, expCatNames()) || '기타';
+
+  return { amount, date, merchant, category };
+}
+
+function normalizeStatementDate(raw){
+  if(raw === undefined || raw === null || raw === '') return null;
+  const s = String(raw).trim();
+  if(!s) return null;
+
+  // YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD (시간이 붙어있어도 앞부분만 매칭)
+  let m = s.match(/(\d{4})[.\-\/](\d{1,2})[.\-\/](\d{1,2})/);
+  if(m) return `${m[1]}-${pad(+m[2])}-${pad(+m[3])}`;
+
+  // YYYYMMDD (구분자 없는 8자리)
+  m = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if(m) return `${m[1]}-${m[2]}-${m[3]}`;
+
+  // 2026년 6월 5일
+  m = s.match(/(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
+  if(m) return `${m[1]}-${pad(+m[2])}-${pad(+m[3])}`;
+
+  // 6월 5일 (연도 없음, 올해로 간주)
+  m = s.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
+  if(m) return `${new Date().getFullYear()}-${pad(+m[1])}-${pad(+m[2])}`;
+
+  // MM/DD, MM.DD (연도 없음)
+  m = s.match(/(\d{1,2})[.\-\/](\d{1,2})(?!\d)/);
+  if(m) return `${new Date().getFullYear()}-${pad(+m[1])}-${pad(+m[2])}`;
+
+  // 엑셀 날짜 시리얼 번호 (셀 서식이 텍스트로 안 잡혀서 숫자로 넘어온 경우)
+  if(/^\d{4,6}(\.\d+)?$/.test(s)){
+    const n = parseFloat(s);
+    if(n > 20000 && n < 80000){
+      const excelEpoch = Date.UTC(1899, 11, 30);
+      const d = new Date(excelEpoch + Math.round(n) * 86400000);
+      return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`;
+    }
+  }
+
+  return null;
+}
+
+function parseSignedAmount(raw){
+  if(raw === undefined || raw === null || raw === '') return NaN;
+  const s = String(raw).replace(/[,\s원]/g, '').replace(/[^0-9\-]/g,'');
+  if(s === '' || s === '-') return NaN;
+  const n = parseInt(s, 10);
+  return n;
+}
+
+function cleanAmount(raw){
+  const n = parseSignedAmount(raw);
+  return isNaN(n) ? NaN : Math.abs(n);
+}
+
+function normalizeHeader(h){
+  return String(h == null ? '' : h).replace(/\s+/g,'').replace(/\(.*?\)/g,'').toLowerCase();
+}
+
+function detectColumns(headers){
+  const findBy = (patterns) => {
+    for(const p of patterns){
+      const h = headers.find(hh => normalizeHeader(hh).includes(p.toLowerCase()));
+      if(h) return h;
+    }
+    return null;
+  };
+  const dateCol = findBy(['이용일자','거래일자','승인일자','매출일자','사용일자','카드사용일','이용일시','거래일시','이용일','거래일','승인일','사용일','일자','날짜']);
+  const amountCol = findBy(['승인금액','이용금액','매출금액','거래금액','원화금액','청구금액','결제금액','승인액','이용액','금액']);
+  const merchantCol = findBy(['가맹점명','가맹점','이용처','상호명','상호','거래내용','내용']);
+  const installCol = findBy(['할부','이용구분','결제구분','거래구분']);
+  const statusCol = findBy(['승인구분','승인상태','거래상태','취소구분','상태구분']);
+  return { dateCol, amountCol, merchantCol, installCol, statusCol };
+}
+
+function scoreHeaderRow(row){
+  const patterns = ['승인금액','이용금액','매출금액','거래금액','원화금액','청구금액','결제금액','금액',
+    '이용일자','거래일자','승인일자','매출일자','사용일자','카드사용일','이용일시','거래일시','사용일','일자','날짜',
+    '가맹점명','가맹점','이용처','상호명','상호','거래내용','내용','카드번호','할부','승인구분','승인상태','거래상태'];
+  let score = 0;
+  (row || []).forEach(cell => {
+    const norm = normalizeHeader(cell);
+    if(norm && patterns.some(p => norm.includes(p.toLowerCase()))) score++;
+  });
+  return score;
+}
+
+function findHeaderRowIndex(rows){
+  let bestIdx = 0, bestScore = -1;
+  for(let i = 0; i < Math.min(10, rows.length); i++){
+    const score = scoreHeaderRow(rows[i]);
+    if(score > bestScore){ bestScore = score; bestIdx = i; }
+  }
+  return bestIdx;
+}
+
+let parsedRows = [];
+let lastUploadDateColFound = true;
+let lastUploadDateParseFailCount = 0;
+let lastUploadCancelledCount = 0;
+let lastUploadNegativeCount = 0;
+let lastUploadSummaryRowCount = 0;
+let uploadSelectedCard = null;
+let lastUploadMatchedFromFilename = false;
+
+function matchCardFromFilename(filename, cards){
+  const norm = normalizeHeader(filename || '');
+  for(const c of (cards || [])){
+    const cardNorm = normalizeHeader(c.name);
+    if(cardNorm && norm.includes(cardNorm)) return c.name;
+  }
+  return null;
+}
+
+function handleStatementFile(file){
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const wb = XLSX.read(e.target.result, { type: 'array', cellDates:false });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rawRows = XLSX.utils.sheet_to_json(sheet, { header:1, defval:'', raw:false });
+      if(!rawRows.length){ toast('내역을 찾지 못했어요. 파일 형식을 확인해주세요'); return; }
+
+      const headerIdx = findHeaderRowIndex(rawRows);
+      const headers = rawRows[headerIdx].map(h => String(h == null ? '' : h).trim());
+      const dataRows = rawRows.slice(headerIdx + 1).filter(r => (r || []).some(cell => cell !== '' && cell !== undefined && cell !== null));
+      const rows = dataRows.map(r => {
+        const obj = {};
+        headers.forEach((h, idx) => { if(h) obj[h] = r[idx]; });
+        return obj;
+      });
+      if(!rows.length){ toast('내역을 찾지 못했어요. 파일 형식을 확인해주세요'); return; }
+
+      const cols = detectColumns(headers);
+      if(!cols.amountCol){
+        const found = headers.filter(Boolean).join(', ') || '없음';
+        toast(`금액 컬럼을 찾지 못했어요. 감지된 컬럼: ${found}`);
+        return;
+      }
+
+      let cancelledCount = 0;
+      const activeRows = cols.statusCol
+        ? rows.filter(r => {
+            const statusVal = String(r[cols.statusCol] == null ? '' : r[cols.statusCol]).trim();
+            if(statusVal.includes('취소')){ cancelledCount++; return false; }
+            return true;
+          })
+        : rows;
+      lastUploadCancelledCount = cancelledCount;
+
+      let summaryRowCount = 0;
+      const SUMMARY_KEYWORDS = ['합계','총계','소계','총이용금액','총결제금액','총 이용금액','총 결제금액'];
+      const transactionRows = activeRows.filter(r => {
+        const isSummary = Object.values(r).some(v => {
+          const s = String(v == null ? '' : v).replace(/\s+/g,'');
+          return SUMMARY_KEYWORDS.some(k => s.includes(k.replace(/\s+/g,'')));
+        });
+        if(isSummary){ summaryRowCount++; return false; }
+        return true;
+      });
+      lastUploadSummaryRowCount = summaryRowCount;
+
+      let negativeCount = 0;
+      const positiveRows = transactionRows.filter(r => {
+        const signed = parseSignedAmount(r[cols.amountCol]);
+        if(!isNaN(signed) && signed < 0){ negativeCount++; return false; }
+        return true;
+      });
+      lastUploadNegativeCount = negativeCount;
+
+      lastUploadDateColFound = !!cols.dateCol;
+      let dateParseFailCount = 0;
+
+      parsedRows = positiveRows.filter(r => {
+        if(!cols.dateCol) return true;
+        const parsed = normalizeStatementDate(r[cols.dateCol]);
+        if(!parsed){ dateParseFailCount++; return false; }
+        return true;
+      }).map(r => {
+        const amount = cleanAmount(r[cols.amountCol]);
+        const date = cols.dateCol ? normalizeStatementDate(r[cols.dateCol]) : todayStr();
+        const merchant = cols.merchantCol ? String(r[cols.merchantCol]).trim() : '';
+        const category = guessCategory(merchant, expCatNames()) || '기타';
+        return { amount, date, merchant, category, include: !!amount && amount > 0 };
+      }).filter(r => !isNaN(r.amount) && r.amount > 0);
+
+      lastUploadDateParseFailCount = dateParseFailCount;
+
+      uploadSelectedCard = matchCardFromFilename(file.name, data.cards);
+      lastUploadMatchedFromFilename = !!uploadSelectedCard;
+
+      if(!parsedRows.length){ toast('유효한 내역이 없어요'); return; }
+      renderPreview();
+    } catch(err){
+      toast('파일을 읽는 중 문제가 발생했어요');
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function renderUploadCardChips(){
+  const names = (data.cards || []).map(c => c.name);
+  if(names.length === 0){
+    $('uploadCardChips').innerHTML = `<div class="empty-cat" style="padding:4px 0;">등록된 카드가 없어요. 💳 카드 관리에서 먼저 추가해주세요</div>`;
+    uploadSelectedCard = null;
+    return;
+  }
+  const noneChip = `<div class="chip ${!uploadSelectedCard?'on':''}" data-c="">미지정</div>`;
+  $('uploadCardChips').innerHTML = noneChip + names.map(n => `<div class="chip ${n===uploadSelectedCard?'on':''}" data-c="${n}">${n}</div>`).join('');
+  $('uploadCardChips').querySelectorAll('.chip').forEach(el => {
+    el.addEventListener('click', () => {
+      uploadSelectedCard = el.getAttribute('data-c') || null;
+      renderUploadCardChips();
+    });
+  });
+}
+
+function renderPreview(){
+  $('uploadCleanupSection').style.display = 'none';
+  $('uploadStep1').style.display = 'none';
+  $('uploadStep2').style.display = 'block';
+  $('uploadConfirm').style.display = 'block';
+  const includedCount = () => parsedRows.filter(r=>r.include).length;
+  let summary = `${parsedRows.length}건을 찾았어요. 추가할 내역을 선택하고 카테고리를 확인해주세요.`;
+  if(lastUploadCancelledCount > 0){
+    summary += ` 취소 건 ${lastUploadCancelledCount}건은 제외했어요.`;
+  }
+  if(lastUploadNegativeCount > 0){
+    summary += ` 환불/마이너스 금액 ${lastUploadNegativeCount}건은 제외했어요.`;
+  }
+  if(lastUploadSummaryRowCount > 0){
+    summary += ` 합계/총계성 행 ${lastUploadSummaryRowCount}건은 제외했어요.`;
+  }
+  if(lastUploadMatchedFromFilename && uploadSelectedCard){
+    summary += ` 📎 파일 이름에서 "${uploadSelectedCard}"를 인식해서 자동으로 선택했어요.`;
+  }
+  if(!lastUploadDateColFound){
+    summary += ` ⚠️ 날짜 컬럼을 찾지 못해서 모든 내역이 오늘 날짜로 표시돼요. 아래에서 날짜를 확인해주세요.`;
+  } else if(lastUploadDateParseFailCount > 0){
+    summary += ` 날짜를 인식할 수 없는 행 ${lastUploadDateParseFailCount}건은 제외했어요.`;
+  }
+  $('uploadSummary').textContent = summary;
+
+  renderUploadCardChips();
+
+  $('previewTable').innerHTML = parsedRows.map((r, i) => `
+    <div class="preview-row">
+      <input type="checkbox" data-i="${i}" class="prow-check" ${r.include?'checked':''}>
+      <div class="pinfo">
+        <div class="pmemo">${h(r.merchant || '내역')}</div>
+        <div class="pdate">${r.date}</div>
+      </div>
+      <select data-i="${i}" class="prow-cat">
+        ${expCatNames().map(c=>`<option value="${c}" ${c===r.category?'selected':''}>${c}</option>`).join('')}
+      </select>
+      <div class="pamt">${r.amount.toLocaleString('ko-KR')}원</div>
+    </div>
+  `).join('');
+
+  $('previewTable').querySelectorAll('.prow-check').forEach(el=>{
+    el.addEventListener('change', ()=>{ parsedRows[+el.getAttribute('data-i')].include = el.checked; });
+  });
+  $('previewTable').querySelectorAll('.prow-cat').forEach(el=>{
+    el.addEventListener('change', ()=>{ parsedRows[+el.getAttribute('data-i')].category = el.value; });
+  });
+}
+
+function resetUploadSheet(){
+  parsedRows = [];
+  uploadSelectedCard = null;
+  lastUploadMatchedFromFilename = false;
+  $('uploadFile').value = '';
+  $('uploadCleanupSection').style.display = 'block';
+  $('deleteUploadedConfirm').style.display = 'none';
+  $('uploadStep1').style.display = 'block';
+  $('uploadStep2').style.display = 'none';
+  $('uploadConfirm').style.display = 'none';
+}
+
+async function confirmUpload(){
+  const chosen = parsedRows.filter(r => r.include);
+  if(!chosen.length){ toast('추가할 내역을 선택해주세요'); return; }
+  chosen.forEach(r => {
+    data.entries.push({
+      id: genId(),
+      type: 'expense', amount: r.amount, date: r.date, category: r.category,
+      memo: r.merchant, payer: myName, method: 'card', cardName: uploadSelectedCard || null, source: 'statement-upload'
+    });
+  });
+  await saveData();
+  $('uploadOverlay').classList.remove('show');
+  resetUploadSheet();
+  render();
+  toast(`${chosen.length}건 추가했어요`);
+}
+
+function isUploadedEntry(e){
+  if(e.source === 'statement-upload') return true;
+  // 이전 버전에서 source 태그 없이 업로드된 내역을 위한 추정 규칙
+  return e.type === 'expense' && e.method === 'card' && !e.cardName && !e.installmentId && !e.recurringId;
+}
+
+let myName = '';
+let data = { entries: [], expCats: DEFAULT_EXP_CATS.map(c => ({ name: c.name, subs: [...c.subs] })), incCats: [...DEFAULT_INC_CATS], recurring: [], cards: [], accounts: [], accountTx: [], installments: [] };
+let cur = new Date();
+let editingId = null;
+let curType = 'expense';
+let curSubcategory = null;
+let curCategory = null;
+let catTab = 'expense';
+let subCatParent = null;
+let expandedCat = null;
+let recurType = 'expense';
+let recurCategory = null;
+let viewMode = 'list';
+let selectedDate = null;
+let curMethod = 'cash';
+let curCard = null;
+let curAccount = null;
+let selectedAccountForDetail = null;
+let ipCard = null;
+let ipCategory = null;
+let editingCardName = null;
+let methodFilterAll = true;
+let selectedMethodFilters = new Set();
+
+const $ = (id) => document.getElementById(id);
+const won = (n) => (n||0).toLocaleString('ko-KR') + '원';
+const pad = (n) => String(n).padStart(2,'0');
+const todayStr = () => { const d=new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+const daysInMonth = (y, mIdx) => new Date(y, mIdx+1, 0).getDate();
+function entryKindClass(e){
+  if(e.type !== 'expense') return '';
+  if(e.recurringId) return 'recurring';
+  if(e.installmentId) return 'installment';
+  return '';
+}
+function migrateCards(){
+  if(!Array.isArray(data.cards)) data.cards = [];
+  data.cards = data.cards.map(c => {
+    if(typeof c === 'string'){
+      return { name: c, payDay: null, cycleStartOffset: -1, cycleStartDay: null, cycleEndOffset: 0, cycleEndDay: null };
+    }
+    if(c.cycleStartOffset === undefined){
+      const cycleStartDay = c.cycleStart || null;
+      const cycleEndDay = c.cycleEnd || null;
+      let cycleStartOffset = -1, cycleEndOffset = 0;
+      if(cycleStartDay && cycleEndDay && cycleStartDay <= cycleEndDay){
+        cycleStartOffset = 0; cycleEndOffset = 0;
+      }
+      return { name: c.name, payDay: c.payDay || null, cycleStartOffset, cycleStartDay, cycleEndOffset, cycleEndDay };
+    }
+    return c;
+  });
+}
+
+function toast(msg){
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  const duration = Math.min(5000, Math.max(1600, msg.length * 60));
+  clearTimeout(t._hideTimer);
+  t._hideTimer = setTimeout(()=>t.classList.remove('show'), duration);
+}
+
+function applyDueRecurring(){
+  const now = new Date();
+  const mk = monthKey(now);
+  let count = 0;
+  (data.recurring || []).forEach(r => {
+    if(!r.active) return;
+    if(r.lastApplied === mk) return;
+    const day = Math.min(r.day || 1, daysInMonth(now.getFullYear(), now.getMonth()));
+    if(now.getDate() < day) return;
+    data.entries.push({
+      id: `rec-${r.id}-${mk}`, type: r.type, amount: r.amount,
+      date: `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(day)}`,
+      category: r.category, memo: r.name, payer: r.payer || myName, recurringId: r.id,
+      method: r.type === 'expense' ? (r.method || null) : null, cardName: r.type === 'expense' ? (r.cardName || null) : null
+    });
+    r.lastApplied = mk;
+    count++;
+  });
+  return count;
+}
+
+function monthsBetween(startYM, endYM){
+  const [sy, sm] = startYM.split('-').map(Number);
+  const [ey, em] = endYM.split('-').map(Number);
+  return (ey - sy) * 12 + (em - sm);
+}
+
+function computeInstallmentAmount(total, months, seq){
+  const base = Math.round(total / months);
+  if(seq < months) return base;
+  return total - base * (months - 1);
+}
+
+function seqToDate(startYM, seq, day){
+  const [sy, sm] = startYM.split('-').map(Number);
+  const totalM = (sm - 1) + (seq - 1);
+  const y = sy + Math.floor(totalM / 12);
+  const mIdx = totalM % 12;
+  const d = Math.min(day || 1, daysInMonth(y, mIdx));
+  return `${y}-${pad(mIdx+1)}-${pad(d)}`;
+}
+
+function applyDueInstallments(){
+  const now = new Date();
+  const mk = monthKey(now);
+  let count = 0;
+  (data.installments || []).forEach(plan => {
+    if(plan.cancelled) return;
+    if(!Array.isArray(plan.appliedSeqs)) plan.appliedSeqs = [];
+    const elapsed = monthsBetween(plan.startYearMonth, mk);
+    const day = Math.min(plan.day || 1, daysInMonth(now.getFullYear(), now.getMonth()));
+    const currentMonthDue = now.getDate() >= day;
+    const maxSeqDue = Math.min(plan.months, elapsed + (currentMonthDue ? 1 : 0));
+    for(let seq = 1; seq <= maxSeqDue; seq++){
+      if(plan.appliedSeqs.includes(seq)) continue;
+      const amount = computeInstallmentAmount(plan.totalAmount, plan.months, seq);
+      data.entries.push({
+        id: `ins-${plan.id}-${seq}`, type: 'expense', amount, date: seqToDate(plan.startYearMonth, seq, plan.day),
+        category: plan.category, memo: `${plan.name} (할부 ${seq}/${plan.months})`,
+        payer: plan.payer || myName, method: 'card', cardName: plan.cardName,
+        installmentId: plan.id, installmentSeq: seq, installmentMonths: plan.months
+      });
+      plan.appliedSeqs.push(seq);
+      count++;
+    }
+  });
+  return count;
+}
+
+// ---------- 저장 ----------
+// 발행된 아트팩트: 가족이 함께 쓰는 공유 저장소(db). 내역·출금 기록은 한 건씩 문서로,
+// 카테고리·카드·통장·고정비·할부 설정은 settings 문서 하나에 저장한다. 다른 사람이 바꾸면 실시간으로 반영된다.
+// 파일로 직접 열었을 땐 이 브라우저(localStorage)에만 저장한다.
+const COL_E = 'budget-entries', COL_T = 'budget-tx', DOC_S = 'budget/settings';
+const ID_OK = /^[A-Za-z0-9_\-.~:@+]{1,200}$/;
+let capDb = null, budgetUid = null;
+let syncedE = new Map(), syncedT = new Map(), syncedS = '';
+let savingCount = 0, remotePending = false, lastLocalTs = 0;
+const remote = { e: null, t: null, s: undefined };
+const h = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function localStore(){ try { const t = window.localStorage; t.setItem('__bg__','1'); t.removeItem('__bg__'); return t; } catch(e){ return null; } }
+function setSync(t){ const el = $('syncChip'); if(el) el.textContent = t; }
+function settingsOf(d){ const { entries, accountTx, ...rest } = d; return rest; }
+function sortKeys(v){ if(Array.isArray(v)) return v.map(sortKeys); if(v && typeof v === 'object'){ const o = {}; Object.keys(v).sort().forEach(k => { o[k] = sortKeys(v[k]); }); return o; } return v; }
+const stable = (v) => JSON.stringify(sortKeys(v));
+function mapOf(arr){ return new Map((arr || []).map(x => [x.id, stable(x)])); }
+function sameMap(a, b){ if(a.size !== b.size) return false; for(const [k, v] of a){ if(b.get(k) !== v) return false; } return true; }
+function normalizeData(){
+  if(!Array.isArray(data.entries)) data.entries = [];
+  migrateExpCats();
+  if(!Array.isArray(data.incCats) || data.incCats.length === 0) data.incCats = [...DEFAULT_INC_CATS];
+  if(!Array.isArray(data.recurring)) data.recurring = [];
+  migrateCards();
+  if(!Array.isArray(data.accounts)) data.accounts = [];
+  if(!Array.isArray(data.accountTx)) data.accountTx = [];
+  if(!Array.isArray(data.installments)) data.installments = [];
+  // 저장소 문서 이름으로 쓸 수 없는 id는 새로 발급
+  data.entries.forEach(e => { if(!ID_OK.test(String(e.id || ''))) e.id = genId(); });
+  data.accountTx.forEach(t => { if(!ID_OK.test(String(t.id || ''))) t.id = genId(); });
+}
+
+async function cloudInit(){
+  try {
+    if(!(window.__hubClaude && window.__hubClaude.use)) return;
+    const [db, user] = await Promise.all([window.__hubClaude.use('db'), window.__hubClaude.use('user')]);
+    if(db){
+      capDb = db;
+      if(user){ try { budgetUid = await user.id(); } catch(e){ budgetUid = null; } }
+    }
+  } catch(e){ capDb = null; }
+}
+
+async function loadAll(){
+  await cloudInit();
+  const ls = localStore();
+
+  // 내 이름 (기기·사람마다 따로)
+  myName = '';
+  if(capDb && budgetUid){
+    try { const p = await capDb.doc('data/users/' + budgetUid + '/budget-profile').get(); if(p.exists) myName = p.data().name || ''; } catch(e){}
+  }
+  if(!myName && ls){ try { myName = ls.getItem('budget-my-name') || ''; } catch(e){} }
+
+  // 가계부 데이터
+  if(capDb){
+    setSync('불러오는 중…');
+    try {
+      const [sDoc, eSnap, tSnap] = await Promise.all([
+        capDb.doc(DOC_S).get(), capDb.collection(COL_E).get(), capDb.collection(COL_T).get()
+      ]);
+      const settings = sDoc.exists ? sDoc.data() : {};
+      data = Object.assign({}, settings, {
+        entries: eSnap.docs.map(d => d.data()),
+        accountTx: tSnap.docs.map(d => d.data())
+      });
+      syncedS = sDoc.exists ? stable(settings) : '';
+      syncedE = mapOf(data.entries); syncedT = mapOf(data.accountTx);
+      setSync('');
+    } catch(e){
+      data = { entries: [] };
+      setSync('⚠️ 불러오기 실패');
+    }
+  } else {
+    try { data = ls ? JSON.parse(ls.getItem('budget-data') || 'null') || { entries: [] } : { entries: [] }; }
+    catch(e){ data = { entries: [] }; }
+  }
+  normalizeData();
+
+  const appliedRecurCount = applyDueRecurring();
+  const appliedInstallCount = applyDueInstallments();
+  // 처음이거나(설정 문서 없음) 자동 등록이 있으면 저장
+  if(appliedRecurCount > 0 || appliedInstallCount > 0 || (capDb && !syncedS)){ await saveData(); }
+  if(capDb) subscribeRemote();
+
+  if(!myName){
+    $('nameOverlay').classList.add('show');
+  } else {
+    $('whoChip').textContent = '나: ' + myName;
+  }
+  render();
+  if(appliedRecurCount > 0 || appliedInstallCount > 0){
+    const parts = [];
+    if(appliedRecurCount > 0) parts.push(`고정비 ${appliedRecurCount}건`);
+    if(appliedInstallCount > 0) parts.push(`할부 ${appliedInstallCount}건`);
+    toast(`${parts.join(', ')}을 자동으로 등록했어요`);
+  }
+}
+
+async function saveData(){
+  if(!capDb){
+    const ls = localStore();
+    try {
+      if(!ls) throw new Error('no storage');
+      ls.setItem('budget-data', JSON.stringify(data));
+    } catch(e){ toast('이 화면에서는 저장이 안 돼요. 💾 백업으로 내용을 복사해두세요.'); }
+    return;
+  }
+  // 바뀐 문서만 계산 (동기) → 순서대로 쓰기
+  const curE = mapOf(data.entries), curT = mapOf(data.accountTx);
+  let curS = stable(settingsOf(data));
+  const ops = [];
+  for(const [id, v] of curE) if(syncedE.get(id) !== v) ops.push({ kind: 'e', op: 'set', id, v });
+  for(const id of syncedE.keys()) if(!curE.has(id)) ops.push({ kind: 'e', op: 'del', id });
+  for(const [id, v] of curT) if(syncedT.get(id) !== v) ops.push({ kind: 't', op: 'set', id, v });
+  for(const id of syncedT.keys()) if(!curT.has(id)) ops.push({ kind: 't', op: 'del', id });
+  if(curS !== syncedS){
+    data._ts = Math.max(Date.now(), (data._ts || 0) + 1); // 설정 문서의 최신 여부 판단용
+    lastLocalTs = data._ts;
+    curS = stable(settingsOf(data));
+    ops.push({ kind: 's', op: 'set', v: curS });
+  }
+  if(!ops.length) return;
+  const prevE = syncedE, prevT = syncedT, prevS = syncedS;
+  syncedE = curE; syncedT = curT; syncedS = curS;
+  savingCount++;
+  setSync('저장 중…');
+  let i = 0;
+  try {
+    for(; i < ops.length; i++){
+      const o = ops[i];
+      const ref = o.kind === 's' ? capDb.doc(DOC_S) : capDb.doc((o.kind === 'e' ? COL_E : COL_T) + '/' + o.id);
+      if(o.op === 'set') await ref.set(JSON.parse(o.v)); else await ref.delete();
+    }
+    setSync('✓ 저장됨');
+  } catch(e){
+    // 못 쓴 문서는 다음 저장 때 다시 시도하도록 '동기화 안 됨'으로 되돌린다
+    for(; i < ops.length; i++){
+      const o = ops[i];
+      if(o.kind === 's'){ syncedS = prevS === curS ? '' : prevS; continue; }
+      const m = o.kind === 'e' ? syncedE : syncedT;
+      const prev = o.kind === 'e' ? prevE : prevT;
+      if(o.op === 'set'){ if(prev.has(o.id)) m.set(o.id, prev.get(o.id)); else m.delete(o.id); }
+      else m.set(o.id, prev.get(o.id));
+    }
+    setSync('⚠️ 저장 실패');
+    toast('저장 중 문제가 발생했어요. 다시 시도해주세요.');
+  }
+  savingCount--;
+  if(savingCount === 0 && remotePending) applyRemote();
+}
+
+function subscribeRemote(){
+  const onErr = () => setSync('⚠️ 실시간 동기화 끊김 — 새로고침해주세요');
+  capDb.collection(COL_E).onSnapshot(snap => { remote.e = snap.docs.map(d => d.data()); scheduleRemote(); }, onErr);
+  capDb.collection(COL_T).onSnapshot(snap => { remote.t = snap.docs.map(d => d.data()); scheduleRemote(); }, onErr);
+  capDb.doc(DOC_S).onSnapshot(snap => { remote.s = snap.exists ? snap.data() : null; scheduleRemote(); }, onErr);
+}
+function scheduleRemote(){
+  if(savingCount > 0){ remotePending = true; return; }
+  applyRemote();
+}
+function applyRemote(){
+  remotePending = false;
+  let changed = false;
+  if(remote.e){
+    const m = mapOf(remote.e);
+    if(!sameMap(m, syncedE)){ data.entries = remote.e.map(x => JSON.parse(JSON.stringify(x))); syncedE = m; changed = true; }
+  }
+  if(remote.t){
+    const m = mapOf(remote.t);
+    if(!sameMap(m, syncedT)){ data.accountTx = remote.t.map(x => JSON.parse(JSON.stringify(x))); syncedT = m; changed = true; }
+  }
+  if(remote.s && (remote.s._ts || 0) >= lastLocalTs){ // 내가 방금 쓴 것보다 오래된 스냅샷은 무시
+    const sj = stable(remote.s);
+    if(sj !== syncedS){
+      Object.assign(data, JSON.parse(sj));
+      normalizeData();
+      syncedS = stable(settingsOf(data));
+      changed = true;
+    }
+  }
+  if(changed){
+    render();
+    setSync('↻ 다른 기기의 변경 반영됨');
+  }
+}
+
+async function saveName(name){
+  myName = name;
+  if(capDb && budgetUid){
+    try { await capDb.doc('data/users/' + budgetUid + '/budget-profile').set({ name }); } catch(e){}
+  }
+  const ls = localStore();
+  if(ls){ try { ls.setItem('budget-my-name', name); } catch(e){} }
+  $('whoChip').textContent = '나: ' + myName;
+}
+
+function monthKey(d){ return `${d.getFullYear()}-${pad(d.getMonth()+1)}`; }
+
+function render(){
+  $('monthLabel').textContent = `${cur.getFullYear()}년 ${cur.getMonth()+1}월`;
+
+  const total = data.entries.reduce((s,e)=> s + (e.type==='income'? e.amount : -e.amount), 0);
+  $('totalBalance').innerHTML = total.toLocaleString('ko-KR') + '<small>원</small>';
+
+  const mk = monthKey(cur);
+  const monthEntries = data.entries.filter(e => e.date.slice(0,7) === mk);
+  const mIncome = monthEntries.filter(e=>e.type==='income').reduce((s,e)=>s+e.amount,0);
+  const mExpense = monthEntries.filter(e=>e.type==='expense').reduce((s,e)=>s+e.amount,0);
+  $('monthIncome').textContent = won(mIncome);
+  $('monthExpense').textContent = won(mExpense);
+
+  // category breakdown (expense only)
+  const catCard = $('catCard');
+  const byCat = {};
+  monthEntries.filter(e=>e.type==='expense').forEach(e=>{ byCat[e.category] = (byCat[e.category]||0) + e.amount; });
+  const catEntries = Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
+  if(catEntries.length === 0){
+    catCard.innerHTML = `<div class="empty-cat">이번 달 지출 내역이 없어요</div>`;
+  } else {
+    const max = catEntries[0][1];
+    catCard.innerHTML = catEntries.map(([name, amt])=>{
+      const hasSubs = findExpCat(name) && findExpCat(name).subs && findExpCat(name).subs.length > 0;
+      const isOpen = expandedCat === name;
+      let subHtml = '';
+      if(isOpen){
+        const subBy = {};
+        monthEntries.filter(e=>e.type==='expense' && e.category===name).forEach(e=>{
+          const key = e.subcategory || '세부 미지정';
+          subBy[key] = (subBy[key]||0) + e.amount;
+        });
+        const subEntries = Object.entries(subBy).sort((a,b)=>b[1]-a[1]);
+        const subMax = subEntries.length ? subEntries[0][1] : 1;
+        subHtml = `<div class="sub-breakdown">` + subEntries.map(([sname, samt])=>`
+          <div class="cat-row sub-row">
+            <div class="name">${sname}</div>
+            <div class="bar-bg"><div class="bar-fg" style="width:${Math.max(6, Math.round(samt/subMax*100))}%"></div></div>
+            <div class="amt">${samt.toLocaleString('ko-KR')}</div>
+          </div>
+        `).join('') + `</div>`;
+      }
+      return `
+      <div class="cat-row ${hasSubs ? 'has-subs' : ''}" data-cat="${name}" style="cursor:${hasSubs?'pointer':'default'};">
+        <div class="name">${name}${hasSubs ? ` <span style="color:var(--muted);">${isOpen?'▾':'▸'}</span>` : ''}</div>
+        <div class="bar-bg"><div class="bar-fg" style="width:${Math.max(6, Math.round(amt/max*100))}%"></div></div>
+        <div class="amt">${amt.toLocaleString('ko-KR')}</div>
+      </div>
+      ${subHtml}
+    `;
+    }).join('');
+    catCard.querySelectorAll('.cat-row.has-subs').forEach(el => {
+      el.addEventListener('click', () => {
+        const name = el.getAttribute('data-cat');
+        expandedCat = (expandedCat === name) ? null : name;
+        render();
+      });
+    });
+  }
+
+  // cash & card breakdown (expense only), filterable by payment method
+  renderMethodFilterChips();
+
+  const byMethod = {};
+  monthEntries.filter(e => e.type === 'expense' && e.method).forEach(e => {
+    const key = e.method === 'cash' ? '현금' : (e.cardName || '카드(미지정)');
+    byMethod[key] = (byMethod[key] || 0) + e.amount;
+  });
+  const activeKeys = getActiveMethodKeys();
+  const cardCard = $('cardSummaryCard');
+  const filteredEntries = Object.entries(byMethod)
+    .filter(([name]) => activeKeys.has(name))
+    .sort((a,b) => b[1]-a[1]);
+
+  if(filteredEntries.length === 0){
+    cardCard.innerHTML = `<div class="empty-cat">해당 조건의 지출 내역이 없어요</div>`;
+  } else {
+    const cardMax = filteredEntries[0][1];
+    const total = filteredEntries.reduce((s,[,amt])=>s+amt, 0);
+    const totalRow = filteredEntries.length > 1
+      ? `<div class="cat-row" style="border-top:1px dashed var(--paper-line);margin-top:4px;padding-top:10px;">
+          <div class="name" style="font-weight:700;color:var(--ink);">합계</div>
+          <div class="bar-bg" style="visibility:hidden;"></div>
+          <div class="amt" style="font-weight:800;">${total.toLocaleString('ko-KR')}</div>
+        </div>`
+      : '';
+    cardCard.innerHTML = filteredEntries.map(([name, amt])=>{
+      const cardObj = data.cards.find(c => c.name === name);
+      const cycleInfo = name !== '현금' && name !== '카드(미지정)' ? formatCardCycleInfo(cardObj) : null;
+      const metaLine = cardObj && !cycleInfo
+        ? `<div class="paymethod-meta">결제일/이용기간 미설정 · 💳 카드 관리에서 등록</div>`
+        : (cycleInfo ? `<div class="paymethod-meta">${cycleInfo}</div>` : '');
+      return `
+      <div class="cat-row" style="${metaLine ? 'margin-bottom:0;' : ''}">
+        <div class="name">${name}</div>
+        <div class="bar-bg"><div class="bar-fg" style="width:${Math.max(6, Math.round(amt/cardMax*100))}%"></div></div>
+        <div class="amt">${amt.toLocaleString('ko-KR')}</div>
+      </div>
+      ${metaLine}
+    `;
+    }).join('') + totalRow;
+  }
+
+  // account balance (cumulative income deposits - manually recorded withdrawals per account)
+  const balanceCard = $('accountBalanceCard');
+  if(!data.accounts || data.accounts.length === 0){
+    balanceCard.innerHTML = `<div class="empty-cat">등록된 통장이 없어요. 🏦 통장 관리에서 추가해보세요</div>`;
+  } else {
+    const balances = data.accounts.map(a => {
+      const deposits = data.entries.filter(e => e.type === 'income' && e.account === a).reduce((s,e)=>s+e.amount, 0);
+      const withdrawals = (data.accountTx || []).filter(t => t.account === a).reduce((s,t)=>s+t.amount, 0);
+      return [a, deposits - withdrawals];
+    }).sort((a,b) => b[1]-a[1]);
+    const balMax = Math.max(1, ...balances.map(b => Math.abs(b[1])));
+    balanceCard.innerHTML = balances.map(([name, amt]) => `
+      <div class="cat-row" data-account="${name}" style="cursor:pointer;">
+        <div class="name">${name}</div>
+        <div class="bar-bg"><div class="bar-fg" style="width:${amt!==0?Math.max(6, Math.round(Math.abs(amt)/balMax*100)):0}%;background:${amt<0?'var(--expense)':'var(--income)'};"></div></div>
+        <div class="amt" style="color:${amt<0?'var(--expense)':'var(--income)'};">${amt.toLocaleString('ko-KR')}</div>
+      </div>
+    `).join('');
+    balanceCard.querySelectorAll('.cat-row[data-account]').forEach(el => {
+      el.addEventListener('click', () => openAccountDetail(el.getAttribute('data-account')));
+    });
+  }
+
+  // entry list grouped by date desc
+  const list = $('entryList');
+  if(monthEntries.length === 0){
+    list.innerHTML = `<div class="empty-state"><div class="big">🧾</div>이번 달 내역이 없어요<div class="small">아래 + 버튼으로 첫 내역을 추가해보세요</div></div>`;
+  } else {
+    const groups = {};
+    monthEntries.forEach(e => { (groups[e.date] = groups[e.date] || []).push(e); });
+    const dates = Object.keys(groups).sort((a,b)=> b.localeCompare(a));
+    list.innerHTML = dates.map(date => {
+      const d = new Date(date);
+      const dayLabel = `${d.getMonth()+1}월 ${d.getDate()}일 (${['일','월','화','수','목','금','토'][d.getDay()]})`;
+      const rows = groups[date].sort((a,b)=> b.id.localeCompare(a.id)).map(e => `
+        <div class="entry ${e.type} ${entryKindClass(e)}" data-id="${e.id}">
+          <div class="tag">${e.category}${e.subcategory ? " · "+e.subcategory : ""}</div>
+          <div class="mid">
+            <div class="memo">${h(e.memo || (e.type==='income'?'수입':'지출'))}</div>
+            <div class="payer">${h(e.payer || '-')}${e.type==='expense' && e.method ? ' · ' + (e.method==='card' ? '💳 '+(e.cardName||'카드') : '💵 현금') : ''}${e.type==='income' && e.account ? ' · 🏦 '+e.account : ''}</div>
+          </div>
+          <div class="amt">${e.amount.toLocaleString('ko-KR')}</div>
+        </div>
+      `).join('');
+      return `<div class="day-group"><div class="day-head">${dayLabel}</div>${rows}</div>`;
+    }).join('');
+
+    list.querySelectorAll('.entry').forEach(el => {
+      el.addEventListener('click', () => openEdit(el.getAttribute('data-id')));
+    });
+  }
+
+  // calendar view
+  renderCalendar(monthEntries);
+  renderDayPanel(monthEntries);
+  $('calendarSection').style.display = viewMode === 'calendar' ? 'block' : 'none';
+  list.style.display = viewMode === 'calendar' ? 'none' : 'block';
+}
+
+function formatShort(n){
+  if(n >= 10000) return (Math.round(n/1000) / 10).toFixed(1).replace(/\.0$/,'') + '만';
+  return n.toLocaleString('ko-KR');
+}
+
+function renderCalendar(monthEntries){
+  const y = cur.getFullYear(), mIdx = cur.getMonth();
+  const firstDay = new Date(y, mIdx, 1).getDay();
+  const totalDays = daysInMonth(y, mIdx);
+  const byDate = {};
+  monthEntries.forEach(e => {
+    byDate[e.date] = byDate[e.date] || { income:0, expense:0 };
+    if(e.type === 'income') byDate[e.date].income += e.amount;
+    else byDate[e.date].expense += e.amount;
+  });
+  const weekdays = ['일','월','화','수','목','금','토'];
+  let cells = weekdays.map(w => `<div class="cal-weekday">${w}</div>`).join('');
+  for(let i=0; i<firstDay; i++) cells += `<div class="cal-cell empty"></div>`;
+  const nowStr = todayStr();
+  for(let d=1; d<=totalDays; d++){
+    const dateStr = `${y}-${pad(mIdx+1)}-${pad(d)}`;
+    const info = byDate[dateStr];
+    const cls = ['cal-cell'];
+    if(dateStr === nowStr) cls.push('today');
+    if(dateStr === selectedDate) cls.push('selected');
+    cells += `<div class="${cls.join(' ')}" data-date="${dateStr}">
+      <div class="cal-day-num">${d}</div>
+      ${info && info.expense ? `<div class="cal-amt expense">-${formatShort(info.expense)}</div>` : ''}
+      ${info && info.income ? `<div class="cal-amt income">+${formatShort(info.income)}</div>` : ''}
+    </div>`;
+  }
+  $('calendarGrid').innerHTML = cells;
+  $('calendarGrid').querySelectorAll('.cal-cell[data-date]').forEach(el => {
+    el.addEventListener('click', () => {
+      const d = el.getAttribute('data-date');
+      selectedDate = (selectedDate === d) ? null : d;
+      render();
+    });
+  });
+}
+
+function renderDayPanel(monthEntries){
+  const panel = $('dayPanel');
+  if(!selectedDate){
+    panel.innerHTML = `<div class="empty-cat">날짜를 선택하면 그 날의 내역을 볼 수 있어요</div>`;
+    return;
+  }
+  const dayEntries = monthEntries.filter(e => e.date === selectedDate);
+  const d = new Date(selectedDate);
+  const dayLabel = `${d.getMonth()+1}월 ${d.getDate()}일 (${['일','월','화','수','목','금','토'][d.getDay()]})`;
+  if(dayEntries.length === 0){
+    panel.innerHTML = `<div class="day-head">${dayLabel}</div><div class="empty-cat">이 날 내역이 없어요</div>`;
+    return;
+  }
+  const rows = dayEntries.sort((a,b)=> b.id.localeCompare(a.id)).map(e => `
+    <div class="entry ${e.type} ${entryKindClass(e)}" data-id="${e.id}">
+      <div class="tag">${e.category}${e.subcategory ? " · "+e.subcategory : ""}</div>
+      <div class="mid">
+        <div class="memo">${h(e.memo || (e.type==='income'?'수입':'지출'))}</div>
+        <div class="payer">${h(e.payer || '-')}${e.type==='expense' && e.method ? ' · ' + (e.method==='card' ? '💳 '+(e.cardName||'카드') : '💵 현금') : ''}${e.type==='income' && e.account ? ' · 🏦 '+e.account : ''}</div>
+      </div>
+      <div class="amt">${e.amount.toLocaleString('ko-KR')}</div>
+    </div>
+  `).join('');
+  panel.innerHTML = `<div class="day-head">${dayLabel}</div>${rows}`;
+  panel.querySelectorAll('.entry').forEach(el => {
+    el.addEventListener('click', () => openEdit(el.getAttribute('data-id')));
+  });
+}
+
+function renderCategoryChips(){
+  const cats = curType === 'expense' ? expCatNames() : data.incCats;
+  if(!cats.includes(curCategory)) curCategory = cats[0];
+  $('fCategoryChips').innerHTML = cats.map(c => `<div class="chip ${c===curCategory?'on':''}" data-c="${c}">${c}</div>`).join('');
+  $('fCategoryChips').querySelectorAll('.chip').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      const changed = curCategory !== el.getAttribute('data-c');
+      curCategory = el.getAttribute('data-c');
+      if(changed) curSubcategory = null;
+      renderCategoryChips();
+    });
+  });
+  renderSubCategoryChips();
+}
+
+function renderSubCategoryChips(){
+  const box = $('fSubCategoryChips');
+  if(curType !== 'expense'){ box.style.display = 'none'; box.innerHTML = ''; return; }
+  const catObj = findExpCat(curCategory);
+  const subs = (catObj && catObj.subs) || [];
+  if(subs.length === 0){ box.style.display = 'none'; box.innerHTML = ''; curSubcategory = null; return; }
+  box.style.display = 'flex';
+  const noneChip = `<div class="chip ${!curSubcategory?'on':''}" data-s="">세부 미지정</div>`;
+  box.innerHTML = noneChip + subs.map(s => `<div class="chip ${s===curSubcategory?'on':''}" data-s="${s}">${s}</div>`).join('');
+  box.querySelectorAll('.chip').forEach(el=>{
+    el.addEventListener('click', ()=>{ curSubcategory = el.getAttribute('data-s') || null; renderSubCategoryChips(); });
+  });
+}
+
+function renderMethodUI(){
+  $('methodField').style.display = curType === 'expense' ? 'block' : 'none';
+  $('accountField').style.display = curType === 'income' ? 'block' : 'none';
+  $('segCash').classList.toggle('on', curMethod === 'cash');
+  $('segCard').classList.toggle('on', curMethod === 'card');
+  $('cardField').style.display = curMethod === 'card' ? 'block' : 'none';
+  if(curType === 'expense' && curMethod === 'card') renderCardChips();
+  if(curType === 'income') renderAccountChips();
+}
+
+function renderCardChips(){
+  const names = (data.cards || []).map(c => c.name);
+  if(names.length === 0){
+    $('fCardChips').innerHTML = `<div class="empty-cat" style="padding:4px 0;">등록된 카드가 없어요. 💳 카드 관리에서 먼저 추가해주세요</div>`;
+    curCard = null;
+    return;
+  }
+  if(!curCard || !names.includes(curCard)) curCard = names[0];
+  $('fCardChips').innerHTML = names.map(n => `<div class="chip ${n===curCard?'on':''}" data-c="${n}">${n}</div>`).join('');
+  $('fCardChips').querySelectorAll('.chip').forEach(el => {
+    el.addEventListener('click', () => { curCard = el.getAttribute('data-c'); renderCardChips(); });
+  });
+}
+
+function renderAccountChips(){
+  const accounts = data.accounts || [];
+  if(accounts.length === 0){
+    $('fAccountChips').innerHTML = `<div class="empty-cat" style="padding:4px 0;">등록된 통장이 없어요. 아래에서 추가해주세요</div>`;
+    curAccount = null;
+    return;
+  }
+  if(!curAccount || !accounts.includes(curAccount)) curAccount = accounts[0];
+  $('fAccountChips').innerHTML = accounts.map(a => `<div class="chip ${a===curAccount?'on':''}" data-a="${a}">${a}</div>`).join('');
+  $('fAccountChips').querySelectorAll('.chip').forEach(el => {
+    el.addEventListener('click', () => { curAccount = el.getAttribute('data-a'); renderAccountChips(); });
+  });
+}
+
+function openAdd(prefill){
+  editingId = null;
+  curType = 'expense'; curCategory = (prefill && prefill.category) || expCatNames()[0];
+  curSubcategory = null;
+  curMethod = prefill ? 'card' : 'cash'; curCard = null; curAccount = null;
+  $('sheetTitle').textContent = prefill ? '내역 확인 (문자로 자동입력)' : '내역 추가';
+  $('segExpense').classList.add('on'); $('segIncome').classList.remove('on');
+  $('fAmount').value = prefill ? (prefill.amount || '') : '';
+  $('fDate').value = (prefill && prefill.date) || todayStr();
+  $('fMemo').value = prefill ? (prefill.merchant || '') : '';
+  $('fPayer').value = myName;
+  $('fDelete').style.display = 'none';
+  renderCategoryChips();
+  renderMethodUI();
+  $('entryOverlay').classList.add('show');
+}
+
+function openEdit(id){
+  const e = data.entries.find(x=>x.id===id);
+  if(!e) return;
+  editingId = id;
+  curType = e.type; curCategory = e.category;
+  curSubcategory = e.subcategory || null;
+  curMethod = e.method || 'cash'; curCard = e.cardName || null; curAccount = e.account || null;
+  $('sheetTitle').textContent = '내역 수정';
+  $('segExpense').classList.toggle('on', curType==='expense');
+  $('segIncome').classList.toggle('on', curType==='income');
+  $('fAmount').value = e.amount;
+  $('fDate').value = e.date;
+  $('fMemo').value = e.memo || '';
+  $('fPayer').value = e.payer || myName;
+  $('fDelete').style.display = 'block';
+  renderCategoryChips();
+  renderMethodUI();
+  $('entryOverlay').classList.add('show');
+}
+
+function closeSheet(){ $('entryOverlay').classList.remove('show'); }
+
+async function saveEntry(){
+  const amount = parseInt($('fAmount').value, 10);
+  if(!amount || amount <= 0){ toast('금액을 입력해주세요'); return; }
+  const date = $('fDate').value || todayStr();
+  const memo = $('fMemo').value.trim();
+  const payer = $('fPayer').value.trim() || myName || '나';
+  const method = curType === 'expense' ? curMethod : null;
+  const cardName = (curType === 'expense' && curMethod === 'card') ? curCard : null;
+  const account = curType === 'income' ? curAccount : null;
+  const subcategory = curType === 'expense' ? curSubcategory : null;
+
+  if(editingId){
+    const e = data.entries.find(x=>x.id===editingId);
+    if(!e){ toast('다른 기기에서 삭제된 내역이에요'); closeSheet(); render(); return; }
+    Object.assign(e, { type:curType, amount, date, category:curCategory, subcategory, memo, payer, method, cardName, account });
+  } else {
+    data.entries.push({
+      id: genId(),
+      type: curType, amount, date, category: curCategory, subcategory, memo, payer, method, cardName, account
+    });
+  }
+  await saveData();
+  closeSheet();
+  render();
+  toast('저장했어요');
+}
+
+async function deleteEntry(){
+  if(!editingId) return;
+  data.entries = data.entries.filter(x=>x.id!==editingId);
+  await saveData();
+  closeSheet();
+  render();
+  toast('삭제했어요');
+}
+
+// ---- Category management ----
+function renderCatManage(){
+  $('catTabExpense').classList.toggle('on', catTab === 'expense');
+  $('catTabIncome').classList.toggle('on', catTab === 'income');
+  $('subCatSection').style.display = catTab === 'expense' ? 'block' : 'none';
+
+  if(catTab === 'expense'){
+    $('catManageList').innerHTML = data.expCats.map(c => `
+      <div class="cat-manage-item" data-name="${c.name}">
+        <span class="cat-manage-label">${c.name}${c.subs && c.subs.length ? ` <span style="color:var(--muted);font-weight:400;">(${c.subs.length})</span>` : ''}</span>
+        ${c.name !== '기타' ? `<button class="cat-del" data-c="${c.name}">×</button>` : ''}
+      </div>
+    `).join('');
+    $('catManageList').querySelectorAll('.cat-manage-label').forEach(el => {
+      el.addEventListener('click', () => {
+        const name = el.closest('.cat-manage-item').getAttribute('data-name');
+        subCatParent = name;
+        renderSubCatSection();
+      });
+    });
+    $('catManageList').querySelectorAll('.cat-del').forEach(el => {
+      el.addEventListener('click', async () => {
+        const name = el.getAttribute('data-c');
+        data.expCats = data.expCats.filter(c => c.name !== name);
+        if(subCatParent === name) subCatParent = null;
+        await saveData();
+        renderCatManage();
+        render();
+        toast('카테고리를 삭제했어요');
+      });
+    });
+    renderSubCatSection();
+  } else {
+    const cats = data.incCats;
+    $('catManageList').innerHTML = cats.map(c => `
+      <div class="cat-manage-item"><span>${c}</span>${c !== '기타' ? `<button class="cat-del" data-c="${c}">×</button>` : ''}</div>
+    `).join('');
+    $('catManageList').querySelectorAll('.cat-del').forEach(el => {
+      el.addEventListener('click', async () => {
+        const name = el.getAttribute('data-c');
+        const idx = data.incCats.indexOf(name);
+        if(idx > -1) data.incCats.splice(idx, 1);
+        await saveData();
+        renderCatManage();
+        toast('카테고리를 삭제했어요');
+      });
+    });
+  }
+}
+
+function renderSubCatSection(){
+  if(catTab !== 'expense') return;
+  if(!subCatParent || !findExpCat(subCatParent)) subCatParent = data.expCats[0] ? data.expCats[0].name : null;
+  $('subCatParentChips').innerHTML = data.expCats.map(c =>
+    `<div class="chip ${c.name===subCatParent?'on':''}" data-c="${c.name}">${c.name}</div>`
+  ).join('');
+  $('subCatParentChips').querySelectorAll('.chip').forEach(el => {
+    el.addEventListener('click', () => { subCatParent = el.getAttribute('data-c'); renderSubCatSection(); });
+  });
+
+  const parent = findExpCat(subCatParent);
+  const subs = (parent && parent.subs) || [];
+  if(subs.length === 0){
+    $('subCatList').innerHTML = `<div class="empty-cat">등록된 하위 카테고리가 없어요</div>`;
+  } else {
+    $('subCatList').innerHTML = subs.map(s => `
+      <div class="cat-manage-item"><span>${s}</span><button class="cat-del" data-s="${s}">×</button></div>
+    `).join('');
+    $('subCatList').querySelectorAll('.cat-del').forEach(el => {
+      el.addEventListener('click', async () => {
+        const s = el.getAttribute('data-s');
+        parent.subs = parent.subs.filter(x => x !== s);
+        await saveData();
+        renderSubCatSection();
+        render();
+        toast('하위 카테고리를 삭제했어요');
+      });
+    });
+  }
+}
+
+async function addCategory(){
+  const name = $('newCatInput').value.trim();
+  if(!name){ toast('카테고리 이름을 입력해주세요'); return; }
+  if(catTab === 'expense'){
+    if(data.expCats.some(c => c.name === name)){ toast('이미 있는 카테고리예요'); return; }
+    const gIdx = data.expCats.findIndex(c => c.name === '기타');
+    const newCat = { name, subs: [] };
+    if(gIdx > -1) data.expCats.splice(gIdx, 0, newCat); else data.expCats.push(newCat);
+  } else {
+    if(data.incCats.includes(name)){ toast('이미 있는 카테고리예요'); return; }
+    const gIdx = data.incCats.indexOf('기타');
+    if(gIdx > -1) data.incCats.splice(gIdx, 0, name); else data.incCats.push(name);
+  }
+  await saveData();
+  $('newCatInput').value = '';
+  renderCatManage();
+  toast('카테고리를 추가했어요');
+}
+
+async function addSubCat(){
+  const name = $('newSubCatInput').value.trim();
+  if(!name){ toast('하위 카테고리 이름을 입력해주세요'); return; }
+  const parent = findExpCat(subCatParent);
+  if(!parent){ toast('상위 카테고리를 먼저 선택해주세요'); return; }
+  if(!Array.isArray(parent.subs)) parent.subs = [];
+  if(parent.subs.includes(name)){ toast('이미 있는 하위 카테고리예요'); return; }
+  parent.subs.push(name);
+  await saveData();
+  $('newSubCatInput').value = '';
+  renderCatManage();
+  toast('하위 카테고리를 추가했어요');
+}
+
+// ---- Cash & card spending filter ----
+function getMethodOptions(){
+  const options = ['현금', ...(data.cards || []).map(c => c.name)];
+  const hasUnnamedCard = (data.entries || []).some(e => e.type==='expense' && e.method==='card' && !e.cardName);
+  if(hasUnnamedCard) options.push('카드(미지정)');
+  return options;
+}
+
+function getActiveMethodKeys(){
+  const options = getMethodOptions();
+  if(methodFilterAll) return new Set(options);
+  return new Set([...selectedMethodFilters].filter(k => options.includes(k)));
+}
+
+function toggleMethodFilter(label){
+  if(label === '__all__'){
+    methodFilterAll = true;
+    selectedMethodFilters = new Set();
+  } else if(methodFilterAll){
+    methodFilterAll = false;
+    selectedMethodFilters = new Set([label]);
+  } else {
+    if(selectedMethodFilters.has(label)) selectedMethodFilters.delete(label);
+    else selectedMethodFilters.add(label);
+    if(selectedMethodFilters.size === 0) methodFilterAll = true;
+  }
+  render();
+}
+
+function renderMethodFilterChips(){
+  const options = getMethodOptions();
+  const chips = [`<div class="chip ${methodFilterAll?'on':''}" data-m="__all__">전체</div>`]
+    .concat(options.map(o => `<div class="chip ${(!methodFilterAll && selectedMethodFilters.has(o))?'on':''}" data-m="${o}">${o}</div>`));
+  $('methodFilterChips').innerHTML = chips.join('');
+  $('methodFilterChips').querySelectorAll('.chip').forEach(el => {
+    el.addEventListener('click', () => toggleMethodFilter(el.getAttribute('data-m')));
+  });
+}
+
+// ---- Card management ----
+function offsetLabel(o){
+  return o === -2 ? '전전월' : (o === -1 ? '전월' : '당월');
+}
+
+function formatCardCycleInfo(card){
+  if(!card) return null;
+  const parts = [];
+  if(card.payDay) parts.push(`결제일 매월 ${card.payDay}일`);
+  if(card.cycleStartDay && card.cycleEndDay){
+    parts.push(`이용기간 ${offsetLabel(card.cycleStartOffset)} ${card.cycleStartDay}일~${offsetLabel(card.cycleEndOffset)} ${card.cycleEndDay}일`);
+  }
+  return parts.length ? parts.join(' · ') : null;
+}
+
+function renderCardManage(){
+  const cards = data.cards || [];
+  if(cards.length === 0){
+    $('cardManageList').innerHTML = `<div class="empty-cat">등록된 카드가 없어요</div>`;
+    return;
+  }
+  $('cardManageList').innerHTML = cards.map(c => `
+    <div class="cat-manage-item" data-name="${c.name}">
+      <span class="cat-manage-label">${c.name}${formatCardCycleInfo(c) ? '' : ' <span style="color:var(--muted);font-weight:400;">(미설정)</span>'}</span>
+      <button class="cat-del" data-c="${c.name}">×</button>
+    </div>
+  `).join('');
+  $('cardManageList').querySelectorAll('.cat-manage-label').forEach(el => {
+    el.addEventListener('click', () => {
+      const name = el.closest('.cat-manage-item').getAttribute('data-name');
+      startEditCard(name);
+    });
+  });
+  $('cardManageList').querySelectorAll('.cat-del').forEach(el => {
+    el.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const name = el.getAttribute('data-c');
+      data.cards = data.cards.filter(c => c.name !== name);
+      if(editingCardName === name) resetCardMgmtForm();
+      await saveData();
+      renderCardManage();
+      render();
+      toast('카드를 삭제했어요');
+    });
+  });
+}
+
+function startEditCard(name){
+  const card = data.cards.find(c => c.name === name);
+  if(!card) return;
+  editingCardName = name;
+  $('cardFormLabel').textContent = `카드 수정: ${name}`;
+  $('cardMgmtInput').value = name;
+  $('cardMgmtInput').disabled = true;
+  $('cardMgmtPayDay').value = card.payDay || '';
+  $('cardMgmtCycleStartOffset').value = (card.cycleStartOffset !== undefined && card.cycleStartOffset !== null) ? card.cycleStartOffset : -1;
+  $('cardMgmtCycleStartDay').value = card.cycleStartDay || '';
+  $('cardMgmtCycleEndOffset').value = (card.cycleEndOffset !== undefined && card.cycleEndOffset !== null) ? card.cycleEndOffset : 0;
+  $('cardMgmtCycleEndDay').value = card.cycleEndDay || '';
+  $('cardMgmtAdd').textContent = '저장';
+  $('cardMgmtCancelEdit').style.display = 'block';
+}
+
+function resetCardMgmtForm(){
+  editingCardName = null;
+  $('cardFormLabel').textContent = '새 카드 추가';
+  $('cardMgmtInput').value = '';
+  $('cardMgmtInput').disabled = false;
+  $('cardMgmtPayDay').value = '';
+  $('cardMgmtCycleStartOffset').value = -1;
+  $('cardMgmtCycleStartDay').value = '';
+  $('cardMgmtCycleEndOffset').value = 0;
+  $('cardMgmtCycleEndDay').value = '';
+  $('cardMgmtAdd').textContent = '추가';
+  $('cardMgmtCancelEdit').style.display = 'none';
+}
+
+async function saveCardMgmt(){
+  const payDay = parseInt($('cardMgmtPayDay').value, 10) || null;
+  const cycleStartOffset = parseInt($('cardMgmtCycleStartOffset').value, 10);
+  const cycleStartDay = parseInt($('cardMgmtCycleStartDay').value, 10) || null;
+  const cycleEndOffset = parseInt($('cardMgmtCycleEndOffset').value, 10);
+  const cycleEndDay = parseInt($('cardMgmtCycleEndDay').value, 10) || null;
+
+  if(editingCardName){
+    const card = data.cards.find(c => c.name === editingCardName);
+    if(card){
+      card.payDay = payDay;
+      card.cycleStartOffset = cycleStartOffset;
+      card.cycleStartDay = cycleStartDay;
+      card.cycleEndOffset = cycleEndOffset;
+      card.cycleEndDay = cycleEndDay;
+    }
+    await saveData();
+    resetCardMgmtForm();
+    renderCardManage();
+    render();
+    toast('카드 정보를 저장했어요');
+    return;
+  }
+
+  const name = $('cardMgmtInput').value.trim();
+  if(!name){ toast('카드 이름을 입력해주세요'); return; }
+  data.cards = data.cards || [];
+  if(data.cards.some(c => c.name === name)){ toast('이미 있는 카드예요'); return; }
+  data.cards.push({ name, payDay, cycleStartOffset, cycleStartDay, cycleEndOffset, cycleEndDay });
+  await saveData();
+  resetCardMgmtForm();
+  renderCardManage();
+  render();
+  toast('카드를 추가했어요');
+}
+
+// ---- Account (통장) management ----
+function renderAccountManage(){
+  const accounts = data.accounts || [];
+  if(accounts.length === 0){
+    $('accountManageList').innerHTML = `<div class="empty-cat">등록된 통장이 없어요</div>`;
+    return;
+  }
+  $('accountManageList').innerHTML = accounts.map(a => `
+    <div class="cat-manage-item"><span>${a}</span><button class="cat-del" data-a="${a}">×</button></div>
+  `).join('');
+  $('accountManageList').querySelectorAll('.cat-del').forEach(el => {
+    el.addEventListener('click', async () => {
+      const name = el.getAttribute('data-a');
+      data.accounts = data.accounts.filter(a => a !== name);
+      await saveData();
+      renderAccountManage();
+      render();
+      toast('통장을 삭제했어요');
+    });
+  });
+}
+
+async function addAccountMgmt(){
+  const name = $('accountMgmtInput').value.trim();
+  if(!name){ toast('통장 이름을 입력해주세요'); return; }
+  data.accounts = data.accounts || [];
+  if(data.accounts.includes(name)){ toast('이미 있는 통장이에요'); return; }
+  data.accounts.push(name);
+  await saveData();
+  $('accountMgmtInput').value = '';
+  renderAccountManage();
+  render();
+  toast('통장을 추가했어요');
+}
+
+// ---- Backup / restore ----
+function openBackup(){
+  $('backupTabExport').classList.add('on'); $('backupTabImport').classList.remove('on');
+  $('backupExportPanel').style.display = 'block'; $('backupImportPanel').style.display = 'none';
+  $('backupExportText').value = JSON.stringify(data, null, 2);
+  $('backupImportText').value = '';
+  $('backupConfirmRow').style.display = 'none';
+  $('backupOverlay').classList.add('show');
+}
+
+async function restoreBackup(parsed){
+  if(!parsed || !Array.isArray(parsed.entries)){ toast('올바른 백업 형식이 아니에요'); return false; }
+  data = parsed;
+  normalizeData();
+  await saveData();
+  return true;
+}
+
+// ---- Account detail (balance breakdown + manual withdrawals) ----
+function openAccountDetail(accountName){
+  selectedAccountForDetail = accountName;
+  $('accountDetailTitle').textContent = accountName;
+  $('txAmount').value = '';
+  $('txDate').value = todayStr();
+  $('txMemo').value = '';
+  renderAccountDetail();
+  $('accountDetailOverlay').classList.add('show');
+}
+
+function renderAccountDetail(){
+  const a = selectedAccountForDetail;
+  if(!a) return;
+  const deposits = data.entries.filter(e => e.type === 'income' && e.account === a).reduce((s,e)=>s+e.amount, 0);
+  const withdrawals = (data.accountTx || []).filter(t => t.account === a).reduce((s,t)=>s+t.amount, 0);
+  const balance = deposits - withdrawals;
+  $('accountDetailSummary').innerHTML =
+    `입금 누적 <b>${deposits.toLocaleString('ko-KR')}원</b> · 출금 누적 <b>${withdrawals.toLocaleString('ko-KR')}원</b><br>현재 잔액 <b style="color:${balance<0?'var(--expense)':'var(--income)'};">${balance.toLocaleString('ko-KR')}원</b>`;
+
+  const txs = (data.accountTx || []).filter(t => t.account === a).sort((x,y)=> y.date.localeCompare(x.date) || y.id.localeCompare(x.id));
+  const list = $('accountTxList');
+  if(txs.length === 0){
+    list.innerHTML = `<div class="empty-cat">기록된 출금 내역이 없어요</div>`;
+  } else {
+    list.innerHTML = txs.map(t => `
+      <div class="entry expense" data-tx="${t.id}">
+        <div class="tag">출금</div>
+        <div class="mid">
+          <div class="memo">${h(t.memo || '출금')}</div>
+          <div class="payer">${t.date}</div>
+        </div>
+        <div class="amt">${t.amount.toLocaleString('ko-KR')}</div>
+        <button class="del" data-tx-del="${t.id}" style="background:transparent;border:none;color:var(--muted);font-size:15px;cursor:pointer;margin-left:4px;">✕</button>
+      </div>
+    `).join('');
+    list.querySelectorAll('[data-tx-del]').forEach(el => {
+      el.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        const id = el.getAttribute('data-tx-del');
+        data.accountTx = data.accountTx.filter(t => t.id !== id);
+        await saveData();
+        renderAccountDetail();
+        render();
+        toast('출금 기록을 삭제했어요');
+      });
+    });
+  }
+}
+
+async function saveAccountTx(){
+  const amount = parseInt($('txAmount').value, 10);
+  if(!amount || amount <= 0){ toast('금액을 입력해주세요'); return; }
+  const date = $('txDate').value || todayStr();
+  const memo = $('txMemo').value.trim();
+  data.accountTx = data.accountTx || [];
+  data.accountTx.push({ id: genId(), account: selectedAccountForDetail, amount, date, memo });
+  await saveData();
+  $('txAmount').value = ''; $('txMemo').value = '';
+  renderAccountDetail();
+  render();
+  toast('출금 기록을 추가했어요');
+}
+
+// ---- Recurring (고정비) management ----
+function renderRecurCategoryChips(){
+  const cats = recurType === 'expense' ? expCatNames() : data.incCats;
+  if(!recurCategory || !cats.includes(recurCategory)) recurCategory = cats[0];
+  $('rCategoryChips').innerHTML = cats.map(c => `<div class="chip ${c===recurCategory?'on':''}" data-c="${c}">${c}</div>`).join('');
+  $('rCategoryChips').querySelectorAll('.chip').forEach(el => {
+    el.addEventListener('click', () => { recurCategory = el.getAttribute('data-c'); renderRecurCategoryChips(); });
+  });
+}
+
+function renderRecurList(){
+  const list = $('recurList');
+  if(!data.recurring || data.recurring.length === 0){
+    list.innerHTML = `<div class="empty-cat">등록된 고정비가 없어요</div>`;
+    return;
+  }
+  list.innerHTML = data.recurring.map(r => `
+    <div class="recur-item ${r.type}">
+      <label class="switch"><input type="checkbox" class="recur-active" data-id="${r.id}" ${r.active?'checked':''}><span class="slider"></span></label>
+      <div class="mid">
+        <div class="name">${h(r.name)}</div>
+        <div class="meta">매월 ${r.day}일 · ${r.category}</div>
+      </div>
+      <div class="amt">${r.amount.toLocaleString('ko-KR')}원</div>
+      <button class="del" data-id="${r.id}">✕</button>
+    </div>
+  `).join('');
+  list.querySelectorAll('.recur-active').forEach(el => {
+    el.addEventListener('change', async () => {
+      const r = data.recurring.find(x => x.id === el.getAttribute('data-id'));
+      if(r){ r.active = el.checked; await saveData(); }
+    });
+  });
+  list.querySelectorAll('.del').forEach(el => {
+    el.addEventListener('click', async () => {
+      data.recurring = data.recurring.filter(x => x.id !== el.getAttribute('data-id'));
+      await saveData();
+      renderRecurList();
+      toast('고정비를 삭제했어요');
+    });
+  });
+}
+
+function openRecurManage(){
+  recurType = 'expense'; recurCategory = null;
+  $('rSegExpense').classList.add('on'); $('rSegIncome').classList.remove('on');
+  $('rName').value = ''; $('rAmount').value = ''; $('rDay').value = 1; $('rPayer').value = myName;
+  renderRecurCategoryChips();
+  renderRecurList();
+  $('recurOverlay').classList.add('show');
+}
+
+async function saveRecurring(){
+  const name = $('rName').value.trim();
+  const amount = parseInt($('rAmount').value, 10);
+  const day = Math.min(31, Math.max(1, parseInt($('rDay').value, 10) || 1));
+  if(!name){ toast('이름을 입력해주세요'); return; }
+  if(!amount || amount <= 0){ toast('금액을 입력해주세요'); return; }
+  data.recurring = data.recurring || [];
+  data.recurring.push({
+    id: genId(), name, amount, day, type: recurType, category: recurCategory,
+    payer: $('rPayer').value.trim() || myName, active: true, lastApplied: null
+  });
+  await saveData();
+  $('rName').value = ''; $('rAmount').value = ''; $('rDay').value = 1;
+  renderRecurList();
+  toast('고정비를 추가했어요');
+}
+
+// ---- Installment (할부) management ----
+function renderIpCardChips(){
+  const names = (data.cards || []).map(c => c.name);
+  if(names.length === 0){
+    $('ipCardChips').innerHTML = `<div class="empty-cat" style="padding:4px 0;">등록된 카드가 없어요. 💳 카드 관리에서 먼저 추가해주세요</div>`;
+    ipCard = null;
+    return;
+  }
+  if(!ipCard || !names.includes(ipCard)) ipCard = names[0];
+  $('ipCardChips').innerHTML = names.map(n => `<div class="chip ${n===ipCard?'on':''}" data-c="${n}">${n}</div>`).join('');
+  $('ipCardChips').querySelectorAll('.chip').forEach(el => {
+    el.addEventListener('click', () => { ipCard = el.getAttribute('data-c'); renderIpCardChips(); });
+  });
+}
+
+function renderIpCategoryChips(){
+  const cats = expCatNames();
+  if(!ipCategory || !cats.includes(ipCategory)) ipCategory = cats[0];
+  $('ipCategoryChips').innerHTML = cats.map(c => `<div class="chip ${c===ipCategory?'on':''}" data-c="${c}">${c}</div>`).join('');
+  $('ipCategoryChips').querySelectorAll('.chip').forEach(el => {
+    el.addEventListener('click', () => { ipCategory = el.getAttribute('data-c'); renderIpCategoryChips(); });
+  });
+}
+
+function renderInstallmentList(){
+  const list = $('installmentList');
+  const plans = data.installments || [];
+  if(plans.length === 0){
+    list.innerHTML = `<div class="empty-cat">등록된 할부가 없어요</div>`;
+    return;
+  }
+  const nowMk = monthKey(new Date());
+  list.innerHTML = plans.map(p => {
+    const elapsed = monthsBetween(p.startYearMonth, nowMk);
+    const curSeq = Math.min(Math.max(elapsed + 1, 1), p.months);
+    const done = elapsed >= p.months;
+    const badge = p.cancelled ? `<span class="ip-badge active">중단됨</span>` : (done ? `<span class="ip-badge done">완료</span>` : `<span class="ip-badge active">진행중</span>`);
+    const thisMonthAmt = (!done && !p.cancelled) ? computeInstallmentAmount(p.totalAmount, p.months, curSeq) : 0;
+    const pct = Math.min(100, Math.round((Math.min(elapsed+ (done?0:1), p.months) / p.months) * 100));
+    return `
+      <div class="ip-item">
+        <div class="ip-top">
+          <div>
+            <div class="ip-name">${h(p.name)}${badge}</div>
+            <div class="ip-meta">${p.cardName || '카드 미지정'} · ${p.category} · ${Math.min(curSeq,p.months)}/${p.months}개월${thisMonthAmt?` · 이번달 ${thisMonthAmt.toLocaleString('ko-KR')}원`:''}</div>
+          </div>
+          <button class="ip-del" data-ip="${p.id}">✕</button>
+        </div>
+        <div class="ip-progress-bg"><div class="ip-progress-fg" style="width:${pct}%;"></div></div>
+      </div>
+    `;
+  }).join('');
+  list.querySelectorAll('.ip-del').forEach(el => {
+    el.addEventListener('click', async () => {
+      const id = el.getAttribute('data-ip');
+      data.installments = data.installments.filter(p => p.id !== id);
+      await saveData();
+      renderInstallmentList();
+      toast('할부 항목을 목록에서 삭제했어요 (이미 등록된 지출 내역은 남아있어요)');
+    });
+  });
+}
+
+function openInstallmentManage(){
+  ipCard = null; ipCategory = null;
+  $('ipName').value = ''; $('ipTotal').value = ''; $('ipMonths').value = 3;
+  const now = new Date();
+  $('ipStartMonth').value = `${now.getFullYear()}-${pad(now.getMonth()+1)}`;
+  $('ipDay').value = now.getDate();
+  $('ipPayer').value = myName;
+  renderIpCardChips();
+  renderIpCategoryChips();
+  renderInstallmentList();
+  $('installmentOverlay').classList.add('show');
+}
+
+async function saveInstallmentPlan(){
+  const name = $('ipName').value.trim();
+  const totalAmount = parseInt($('ipTotal').value, 10);
+  const months = Math.max(2, parseInt($('ipMonths').value, 10) || 2);
+  const startYearMonth = $('ipStartMonth').value;
+  const day = Math.min(31, Math.max(1, parseInt($('ipDay').value, 10) || 1));
+  if(!name){ toast('품목명을 입력해주세요'); return; }
+  if(!totalAmount || totalAmount <= 0){ toast('할부 총액을 입력해주세요'); return; }
+  if(!startYearMonth){ toast('첫 결제월을 선택해주세요'); return; }
+  if(!ipCard){ toast('카드를 등록하고 선택해주세요'); return; }
+
+  data.installments = data.installments || [];
+  data.installments.push({
+    id: genId(), name, totalAmount, months, startYearMonth, day,
+    cardName: ipCard, category: ipCategory, payer: $('ipPayer').value.trim() || myName,
+    cancelled: false, appliedSeqs: []
+  });
+  const count = applyDueInstallments();
+  await saveData();
+  $('ipName').value = ''; $('ipTotal').value = '';
+  renderInstallmentList();
+  render();
+  toast(count > 0 ? `할부를 등록했어요 (지난 회차 ${count}건 자동 반영)` : '할부를 등록했어요');
+}
+
+// ---- Bulk edit (find memo -> rename / recategorize) ----
+let bulkMatches = [];
+let bulkSelectedCategory = null;
+let bulkSelectedSubcategory = null;
+
+function searchBulkEdit(){
+  const q = $('bulkFindText').value.trim();
+  if(!q){ toast('찾을 메모를 입력해주세요'); return; }
+  bulkMatches = data.entries.filter(e => (e.memo || '').includes(q));
+  bulkSelectedCategory = null;
+  bulkSelectedSubcategory = null;
+
+  if(bulkMatches.length === 0){
+    $('bulkSearchResult').innerHTML = `<div class="empty-cat">일치하는 내역이 없어요</div>`;
+    $('bulkEditForm').style.display = 'none';
+    return;
+  }
+
+  const total = bulkMatches.reduce((s,e)=>s+e.amount, 0);
+  const preview = bulkMatches.slice(0, 5).map(e => `${e.date} · ${h(e.memo || '(메모 없음)')} · ${e.amount.toLocaleString('ko-KR')}원`).join('<br>');
+  const more = bulkMatches.length > 5 ? `<br>...외 ${bulkMatches.length - 5}건` : '';
+  $('bulkSearchResult').innerHTML = `
+    <div class="sms-hint" style="margin-top:0;font-weight:700;color:var(--ink);">${bulkMatches.length}건 찾았어요 (합계 ${total.toLocaleString('ko-KR')}원)</div>
+    <div class="sms-hint">${preview}${more}</div>
+  `;
+
+  const hasExpense = bulkMatches.some(e => e.type === 'expense');
+  const hasIncome = bulkMatches.some(e => e.type === 'income');
+  const cats = [...new Set([...(hasExpense ? expCatNames() : []), ...(hasIncome ? data.incCats : [])])];
+  $('bulkCategoryChips').innerHTML = cats.map(c => `<div class="chip" data-c="${c}">${c}</div>`).join('');
+  $('bulkCategoryChips').querySelectorAll('.chip').forEach(el => {
+    el.addEventListener('click', () => {
+      bulkSelectedCategory = (bulkSelectedCategory === el.getAttribute('data-c')) ? null : el.getAttribute('data-c');
+      bulkSelectedSubcategory = null;
+      $('bulkCategoryChips').querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c.getAttribute('data-c') === bulkSelectedCategory));
+      renderBulkSubCategoryChips();
+    });
+  });
+
+  renderBulkSubCategoryChips();
+  $('bulkEditForm').style.display = 'block';
+}
+
+function renderBulkSubCategoryChips(){
+  const box = $('bulkSubCategoryChips');
+  const catObj = bulkSelectedCategory ? findExpCat(bulkSelectedCategory) : null;
+  const subs = (catObj && catObj.subs) || [];
+  if(subs.length === 0){ box.style.display = 'none'; box.innerHTML = ''; bulkSelectedSubcategory = null; return; }
+  box.style.display = 'flex';
+  const noneChip = `<div class="chip ${!bulkSelectedSubcategory?'on':''}" data-s="">세부 미지정</div>`;
+  box.innerHTML = noneChip + subs.map(s => `<div class="chip ${s===bulkSelectedSubcategory?'on':''}" data-s="${s}">${s}</div>`).join('');
+  box.querySelectorAll('.chip').forEach(el => {
+    el.addEventListener('click', () => { bulkSelectedSubcategory = el.getAttribute('data-s') || null; renderBulkSubCategoryChips(); });
+  });
+}
+
+async function applyBulkEdit(){
+  if(bulkMatches.length === 0){ toast('먼저 검색해주세요'); return; }
+  const newMemo = $('bulkNewMemo').value.trim();
+  if(!newMemo && !bulkSelectedCategory){ toast('바꿀 메모나 카테고리를 입력/선택해주세요'); return; }
+
+  const ids = new Set(bulkMatches.map(e => e.id));
+  data.entries.forEach(e => {
+    if(!ids.has(e.id)) return;
+    if(newMemo) e.memo = newMemo;
+    if(bulkSelectedCategory){
+      e.category = bulkSelectedCategory;
+      e.subcategory = bulkSelectedSubcategory || null;
+    }
+  });
+  await saveData();
+  const count = bulkMatches.length;
+  bulkMatches = [];
+  bulkSelectedCategory = null;
+  bulkSelectedSubcategory = null;
+  $('bulkFindText').value = '';
+  $('bulkNewMemo').value = '';
+  $('bulkSearchResult').innerHTML = '';
+  $('bulkSubCategoryChips').style.display = 'none';
+  $('bulkEditForm').style.display = 'none';
+  render();
+  toast(`${count}건을 일괄 수정했어요`);
+}
+
+// events
+$('prevMonth').addEventListener('click', ()=>{ cur.setMonth(cur.getMonth()-1); selectedDate=null; render(); });
+$('nextMonth').addEventListener('click', ()=>{ cur.setMonth(cur.getMonth()+1); selectedDate=null; render(); });
+$('viewList').addEventListener('click', ()=>{
+  viewMode = 'list';
+  $('viewList').classList.add('on'); $('viewCalendar').classList.remove('on');
+  render();
+});
+$('viewCalendar').addEventListener('click', ()=>{
+  viewMode = 'calendar';
+  $('viewCalendar').classList.add('on'); $('viewList').classList.remove('on');
+  render();
+});
+$('fabAdd').addEventListener('click', ()=>openAdd());
+$('fabUpload').addEventListener('click', ()=>{
+  resetUploadSheet();
+  $('uploadOverlay').classList.add('show');
+});
+$('uploadFile').addEventListener('change', (e)=>{
+  const file = e.target.files[0];
+  if(file) handleStatementFile(file);
+});
+$('uploadCancel').addEventListener('click', ()=>{
+  $('uploadOverlay').classList.remove('show');
+  resetUploadSheet();
+});
+$('uploadConfirm').addEventListener('click', confirmUpload);
+$('uploadOverlay').addEventListener('click', (e)=>{
+  if(e.target.id === 'uploadOverlay'){ $('uploadOverlay').classList.remove('show'); resetUploadSheet(); }
+});
+$('btnDeleteUploaded').addEventListener('click', ()=>{
+  const matches = data.entries.filter(isUploadedEntry);
+  if(matches.length === 0){ toast('업로드로 추가된 것으로 보이는 내역이 없어요'); return; }
+  const total = matches.reduce((s,e)=>s+e.amount, 0);
+  $('deleteUploadedSummary').textContent = `카드 내역서 업로드로 추가된 것으로 보이는 내역 ${matches.length}건 (합계 ${total.toLocaleString('ko-KR')}원)을 삭제할까요? 되돌릴 수 없어요.`;
+  $('deleteUploadedConfirm').style.display = 'block';
+});
+$('deleteUploadedCancel').addEventListener('click', ()=>{ $('deleteUploadedConfirm').style.display = 'none'; });
+$('deleteUploadedConfirmBtn').addEventListener('click', async ()=>{
+  const before = data.entries.length;
+  data.entries = data.entries.filter(e => !isUploadedEntry(e));
+  const removed = before - data.entries.length;
+  await saveData();
+  $('deleteUploadedConfirm').style.display = 'none';
+  render();
+  toast(`${removed}건을 삭제했어요. 업데이트된 방식으로 다시 업로드해주세요.`);
+});
+$('fabSms').addEventListener('click', ()=>{
+  $('smsText').value = '';
+  $('smsPreview').classList.remove('show');
+  $('smsOverlay').classList.add('show');
+});
+$('smsCancel').addEventListener('click', ()=> $('smsOverlay').classList.remove('show'));
+$('smsAnalyze').addEventListener('click', ()=>{
+  const raw = $('smsText').value;
+  if(!raw.trim()){ toast('문자 내용을 붙여넣어주세요'); return; }
+  const parsed = parseSmsText(raw);
+  if(!parsed.amount){
+    toast('금액을 찾지 못했어요. 직접 입력해주세요');
+  }
+  $('smsOverlay').classList.remove('show');
+  openAdd(parsed);
+});
+$('fCancel').addEventListener('click', closeSheet);
+$('fSave').addEventListener('click', saveEntry);
+$('fDelete').addEventListener('click', deleteEntry);
+$('segExpense').addEventListener('click', ()=>{ curType='expense'; $('segExpense').classList.add('on'); $('segIncome').classList.remove('on'); renderCategoryChips(); renderMethodUI(); });
+$('segIncome').addEventListener('click', ()=>{ curType='income'; $('segIncome').classList.add('on'); $('segExpense').classList.remove('on'); renderCategoryChips(); renderMethodUI(); });
+$('segCash').addEventListener('click', ()=>{ curMethod='cash'; renderMethodUI(); });
+$('segCard').addEventListener('click', ()=>{ curMethod='card'; renderMethodUI(); });
+$('quickAccountAdd').addEventListener('click', async ()=>{
+  const name = $('quickAccountInput').value.trim();
+  if(!name){ toast('통장 이름을 입력해주세요'); return; }
+  data.accounts = data.accounts || [];
+  if(!data.accounts.includes(name)) data.accounts.push(name);
+  await saveData();
+  curAccount = name;
+  $('quickAccountInput').value = '';
+  renderAccountChips();
+  toast('통장을 추가했어요');
+});
+$('btnCardManage').addEventListener('click', ()=>{
+  resetCardMgmtForm();
+  renderCardManage();
+  $('cardOverlay').classList.add('show');
+});
+$('cardMgmtAdd').addEventListener('click', saveCardMgmt);
+$('cardMgmtCancelEdit').addEventListener('click', resetCardMgmtForm);
+$('cardClose').addEventListener('click', ()=>{ resetCardMgmtForm(); $('cardOverlay').classList.remove('show'); });
+$('cardOverlay').addEventListener('click', (e)=>{ if(e.target.id==='cardOverlay'){ resetCardMgmtForm(); $('cardOverlay').classList.remove('show'); } });
+$('btnAccountManage').addEventListener('click', ()=>{
+  renderAccountManage();
+  $('accountOverlay').classList.add('show');
+});
+$('accountMgmtAdd').addEventListener('click', addAccountMgmt);
+$('accountClose').addEventListener('click', ()=>{ $('accountOverlay').classList.remove('show'); });
+$('accountOverlay').addEventListener('click', (e)=>{ if(e.target.id==='accountOverlay') $('accountOverlay').classList.remove('show'); });
+$('txSave').addEventListener('click', saveAccountTx);
+$('accountDetailClose').addEventListener('click', ()=>{ $('accountDetailOverlay').classList.remove('show'); });
+$('accountDetailOverlay').addEventListener('click', (e)=>{ if(e.target.id==='accountDetailOverlay') $('accountDetailOverlay').classList.remove('show'); });
+
+$('btnBackup').addEventListener('click', openBackup);
+$('backupClose').addEventListener('click', ()=>{ $('backupOverlay').classList.remove('show'); });
+$('backupOverlay').addEventListener('click', (e)=>{ if(e.target.id==='backupOverlay') $('backupOverlay').classList.remove('show'); });
+$('backupTabExport').addEventListener('click', ()=>{
+  $('backupTabExport').classList.add('on'); $('backupTabImport').classList.remove('on');
+  $('backupExportPanel').style.display = 'block'; $('backupImportPanel').style.display = 'none';
+  $('backupExportText').value = JSON.stringify(data, null, 2);
+});
+$('backupTabImport').addEventListener('click', ()=>{
+  $('backupTabImport').classList.add('on'); $('backupTabExport').classList.remove('on');
+  $('backupImportPanel').style.display = 'block'; $('backupExportPanel').style.display = 'none';
+});
+$('backupCopyBtn').addEventListener('click', async ()=>{
+  const ta = $('backupExportText');
+  ta.focus(); ta.select();
+  try {
+    await navigator.clipboard.writeText(ta.value);
+    toast('복사했어요');
+  } catch(e){
+    toast('자동 복사가 안 되면 길게 눌러 직접 복사해주세요');
+  }
+});
+$('backupImportBtn').addEventListener('click', ()=>{
+  const raw = $('backupImportText').value.trim();
+  if(!raw){ toast('백업 내용을 붙여넣어주세요'); return; }
+  try { JSON.parse(raw); } catch(e){ toast('올바른 백업 형식이 아니에요'); return; }
+  $('backupConfirmRow').style.display = 'block';
+});
+$('backupCancelConfirm').addEventListener('click', ()=>{ $('backupConfirmRow').style.display = 'none'; });
+$('backupConfirmBtn').addEventListener('click', async ()=>{
+  let parsed;
+  try { parsed = JSON.parse($('backupImportText').value.trim()); }
+  catch(e){ toast('올바른 백업 형식이 아니에요'); return; }
+  const ok = await restoreBackup(parsed);
+  if(!ok) return;
+  $('backupOverlay').classList.remove('show');
+  render();
+  toast('복원했어요');
+});
+$('whoChip').addEventListener('click', ()=>{ $('nameInput').value = myName; $('nameOverlay').classList.add('show'); });
+$('nameSave').addEventListener('click', async ()=>{
+  const v = $('nameInput').value.trim();
+  if(!v){ toast('이름을 입력해주세요'); return; }
+  await saveName(v);
+  $('nameOverlay').classList.remove('show');
+  render();
+});
+$('fMemo').addEventListener('input', ()=>{
+  if(curType !== 'expense') return;
+  const guess = guessCategory($('fMemo').value, expCatNames());
+  if(guess){ curCategory = guess; renderCategoryChips(); }
+});
+$('entryOverlay').addEventListener('click', (e)=>{ if(e.target.id==='entryOverlay') closeSheet(); });
+$('nameOverlay').addEventListener('click', (e)=>{ if(e.target.id==='nameOverlay' && myName) $('nameOverlay').classList.remove('show'); });
+
+$('btnCatManage').addEventListener('click', ()=>{
+  catTab = 'expense';
+  renderCatManage();
+  $('catOverlay').classList.add('show');
+});
+$('catTabExpense').addEventListener('click', ()=>{ catTab = 'expense'; renderCatManage(); });
+$('catTabIncome').addEventListener('click', ()=>{ catTab = 'income'; renderCatManage(); });
+$('addCatBtn').addEventListener('click', addCategory);
+$('addSubCatBtn').addEventListener('click', addSubCat);
+$('catClose').addEventListener('click', ()=>{ $('catOverlay').classList.remove('show'); render(); });
+$('catOverlay').addEventListener('click', (e)=>{ if(e.target.id==='catOverlay'){ $('catOverlay').classList.remove('show'); render(); } });
+
+$('btnRecurManage').addEventListener('click', openRecurManage);
+$('rSegExpense').addEventListener('click', ()=>{ recurType='expense'; $('rSegExpense').classList.add('on'); $('rSegIncome').classList.remove('on'); renderRecurCategoryChips(); });
+$('rSegIncome').addEventListener('click', ()=>{ recurType='income'; $('rSegIncome').classList.add('on'); $('rSegExpense').classList.remove('on'); renderRecurCategoryChips(); });
+$('rSave').addEventListener('click', saveRecurring);
+$('recurClose').addEventListener('click', ()=> $('recurOverlay').classList.remove('show'));
+$('recurOverlay').addEventListener('click', (e)=>{ if(e.target.id==='recurOverlay') $('recurOverlay').classList.remove('show'); });
+
+$('btnInstallmentManage').addEventListener('click', openInstallmentManage);
+$('installmentClose').addEventListener('click', ()=> $('installmentOverlay').classList.remove('show'));
+$('ipSave').addEventListener('click', saveInstallmentPlan);
+$('installmentOverlay').addEventListener('click', (e)=>{ if(e.target.id==='installmentOverlay') $('installmentOverlay').classList.remove('show'); });
+
+$('btnBulkEdit').addEventListener('click', ()=>{
+  bulkMatches = [];
+  bulkSelectedCategory = null;
+  bulkSelectedSubcategory = null;
+  $('bulkFindText').value = '';
+  $('bulkNewMemo').value = '';
+  $('bulkSearchResult').innerHTML = '';
+  $('bulkSubCategoryChips').style.display = 'none';
+  $('bulkEditForm').style.display = 'none';
+  $('bulkEditOverlay').classList.add('show');
+});
+$('bulkSearchBtn').addEventListener('click', searchBulkEdit);
+$('bulkEditApply').addEventListener('click', applyBulkEdit);
+$('bulkEditClose').addEventListener('click', ()=> $('bulkEditOverlay').classList.remove('show'));
+$('bulkEditOverlay').addEventListener('click', (e)=>{ if(e.target.id==='bulkEditOverlay') $('bulkEditOverlay').classList.remove('show'); });
+
+loadAll();
+</script>
+
+
+</body>
+</html>

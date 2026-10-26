@@ -1,0 +1,18 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1) 개인 데이터(루틴, 성경, 독서, 플래너, OPIc 등): 로그인한 본인만 읽고 쓸 수 있어요.
+    match /data/users/{uid}/{document=**} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // 2) 함께 쓰는 데이터(우리집 가계부): 아래 목록의 두 Google 계정만 읽고 쓸 수 있어요.
+    //    '내이메일@gmail.com'과 '배우자이메일@gmail.com'을 실제 로그인에 쓰는 Google 이메일로 바꿔서 게시하세요.
+    match /shared/home/{document=**} {
+      allow read, write: if request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email in ['내이메일@gmail.com', '배우자이메일@gmail.com'];
+    }
+  }
+}

@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>성경 읽기 체크</title>
+<script>
+/* 허브 안에서 열렸을 때: 허브(부모 화면)에게 메시지로 부탁해서 계정 저장소를 쓰고, 다른 영역의 도구로 이동한다.
+   (My Tools Hub의 다른 도구들과 같은 방식) */
+(function () {
+  if (window.parent === window) return;
+  document.documentElement.classList.add('emb');
+  var P = window.parent, seq = 0, pending = {}, subs = {};
+  function post(m) { m.__hub = 1; P.postMessage(m, '*'); }
+  function call(cap, op, args) {
+    return new Promise(function (res, rej) {
+      var id = ++seq; pending[id] = { res: res, rej: rej };
+      post({ id: id, cap: cap, op: op, args: args || [] });
+    });
+  }
+  function docSnap(d) {
+    var body = d.data;
+    return { id: d.id, exists: !!d.exists, metadata: d.metadata || {},
+      data: function () { return body == null ? undefined : JSON.parse(JSON.stringify(body)); } };
+  }
+  function wrap(s) {
+    if (!s) return s;
+    if (s.kind === 'doc') return docSnap(s);
+    var docs = (s.docs || []).map(docSnap);
+    return { docs: docs, size: docs.length, empty: !docs.length, metadata: s.metadata || {}, docChanges: function () { return []; } };
+  }
+  window.addEventListener('message', function (e) {
+    if (e.source !== P) return;
+    var m = e.data; if (!m || !m.__hubr) return;
+    if (m.sub) { var s = subs[m.sub]; if (!s) return; if (m.err) { if (s.err) s.err(m.err); } else s.next(wrap(m.snap)); return; }
+    var p = pending[m.id]; if (!p) return; delete pending[m.id];
+    if (m.err) p.rej(m.err); else p.res(m.val);
+  });
+  function subscribe(kind, path, lim, next, err) {
+    var id = ++seq; subs[id] = { next: next, err: err };
+    post({ sub: id, kind: kind, path: path, lim: lim || null });
+    return function () { delete subs[id]; post({ unsub: id }); };
+  }
+  function docRef(path) {
+    return {
+      id: path.split('/').pop(), path: path,
+      get: function () { return call('db', 'docGet', [path]).then(wrap); },
+      set: function (d) { return call('db', 'docSet', [path, d]); },
+      update: function (d) { return call('db', 'docUpdate', [path, d]); },
+      'delete': function () { return call('db', 'docDel', [path]); },
+      collection: function (sub) { return colRef(path + '/' + sub); },
+      onSnapshot: function (next, err) { return subscribe('doc', path, null, next, err); }
+    };
+  }
+  function colRef(path, lim) {
+    return {
+      path: path,
+      doc: function (id) { return docRef(path + '/' + (id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 8)))); },
+      limit: function (n) { return colRef(path, n); },
+      get: function () { return call('db', 'colGet', [path, lim || null]).then(wrap); },
+      onSnapshot: function (next, err) { return subscribe('col', path, lim, next, err); }
+    };
+  }
+  var capsP = null;
+  function caps() {
+    if (!capsP) capsP = new Promise(function (res) {
+      var done = false;
+      call('hub', 'caps', []).then(function (c) { done = true; res(c || {}); }, function () { done = true; res({}); });
+      setTimeout(function () { if (!done) res({}); }, 12000);
+    });
+    return capsP;
+  }
+  var api = {
+    use: function (name) {
+      return caps().then(function (c) {
+        if (!c[name]) return null;
+        if (name === 'db') return { doc: docRef, collection: function (p) { return colRef(p); } };
+        if (name === 'user') return {
+          id: function () { return call('user', 'id', []); },
+          isOwner: function () { return false; }, canEdit: function () { return false; }, can: function () { return null; }
+        };
+        if (name === 'downloads') return { save: function (r) { return call('downloads', 'save', [{ filename: r.filename, data: r.data }]); } };
+        return null;
+      });
+    }
+  };
+  window.__hubClaude = api;
+  window.__hubNav = function (key) { post({ nav: key }); };
+  window.__hubTools = function () { return call('hub', 'tools', []); };
+  // 도구가 "오늘 이만큼 했다"는 수치를 알려 주면 허브가 계정에 남기고, 루틴이 그 수치로 자동 체크한다
+  window.__hubReport = function (r) { post({ report: r }); };
+})();
+</script>
+<style>
+  /* Layout: My Tools Hub 안에서 도는 한 화면 도구. 전체 진행 → 구약/신약/연속/오늘 → 최근 활동 → 66권 목록 순서. */
+  :root {
+    --bg: #f6f6f8; --card: #ffffff; --line: #e8e9ee; --track: #e6e7ec;
+    --ink: #1a1b1f; --ink2: #6b6e7a; --accent: #4767d6; --accent-ink: #ffffff;
+    --accent-soft: #eaeffc; --done: #2f9e5f; --warn: #b4540a; --warn-soft: #fdf1e3;
+    --h0: #e8e9ee; --h1: #cfdbf6; --h2: #9db5ec; --h3: #6b8ae0; --h4: #3f5fc4;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", Pretendard, Roboto, sans-serif;
+    --mono: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 var(--font); }
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .num { font-variant-numeric: tabular-nums; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 22px max(18px, env(safe-area-inset-left, 0px)) 48px max(18px, env(safe-area-inset-right, 0px)); display: flex; flex-direction: column; gap: 16px; }
+
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 10px 14px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: -.01em; }
+  .tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .saved { font-size: 12.5px; font-weight: 600; color: var(--done); }
+  .saved.busy { color: var(--ink2); }
+  .saved.local { color: var(--warn); }
+  .btn { min-height: 38px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); font-weight: 600; font-size: 13.5px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .btn:hover { border-color: #c9cbd4; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn.sm { min-height: 32px; padding: 0 11px; font-size: 12.5px; }
+  .linkbtn { background: none; border: 0; padding: 0; color: var(--accent); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 20px; box-shadow: 0 1px 2px rgba(20, 22, 30, .04); }
+  .bar { height: 10px; border-radius: 99px; background: var(--track); overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 99px; background: var(--accent); transition: width .2s; }
+  .bar.done i { background: var(--done); }
+  .bar.sm { height: 6px; }
+
+  .total { display: flex; flex-direction: column; gap: 14px; }
+  .total-r { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  .pct { font-size: 56px; line-height: 1; font-weight: 700; letter-spacing: -.02em; }
+  .pct small { font-size: 26px; font-weight: 700; }
+  .total-r .cnt { font-size: 16px; }
+  .total-r .cnt b { font-weight: 700; }
+  .total-r .left { margin-left: auto; color: var(--ink2); }
+  .next { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13.5px; color: var(--ink2); }
+  .next b { color: var(--ink); }
+
+  .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  .tile { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px 18px; display: flex; flex-direction: column; gap: 6px; min-width: 0; box-shadow: 0 1px 2px rgba(20, 22, 30, .04); }
+  .tile .lb { font-size: 13px; color: var(--ink2); }
+  .tile .v { font-size: 28px; font-weight: 700; line-height: 1.15; letter-spacing: -.01em; }
+  .tile .v small { font-size: 13px; font-weight: 600; color: var(--ink2); margin-left: 4px; letter-spacing: 0; }
+  .tile .bar { margin-top: 4px; }
+
+  .sec-t { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  .sec-t h2 { margin: 0; font-size: 16px; }
+  .sec-t span { font-size: 12.5px; color: var(--ink2); }
+  .heat-box { overflow-x: auto; }
+  .heat { display: grid; grid-template-rows: repeat(7, var(--c)); grid-auto-flow: column; grid-auto-columns: var(--c); gap: 4px; --c: 16px; width: max-content; }
+  .heat i { border-radius: 4px; background: var(--h0); }
+  .heat i.l1 { background: var(--h1); } .heat i.l2 { background: var(--h2); } .heat i.l3 { background: var(--h3); } .heat i.l4 { background: var(--h4); }
+  .heat i.f { visibility: hidden; }
+  .heat i.t { outline: 2px solid var(--ink); outline-offset: 1px; }
+  .legend { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 12px; color: var(--ink2); }
+  .legend i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; }
+
+  .ctl { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; }
+  .seg { display: inline-flex; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 4px; gap: 2px; }
+  .seg button { border: 0; background: none; min-height: 34px; padding: 0 16px; border-radius: 9px; font-weight: 600; color: var(--ink2); }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+  .datef { display: flex; align-items: center; gap: 10px; color: var(--ink2); font-size: 13.5px; }
+  .datef input { min-height: 38px; border: 1px solid var(--line); border-radius: 10px; padding: 0 12px; background: var(--card); }
+
+  .gh { font-size: 13.5px; font-weight: 600; color: var(--ink2); margin: 8px 2px 2px; }
+  .books { display: flex; flex-direction: column; gap: 8px; }
+  .book { background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 1px 2px rgba(20, 22, 30, .04); overflow: hidden; }
+  .bh { width: 100%; display: grid; grid-template-columns: 22px minmax(70px, 130px) minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 14px 18px; background: none; border: 0; text-align: left; min-height: 54px; }
+  .bh .tri { font-size: 11px; color: var(--ink2); transition: transform .12s; }
+  .book.open .bh .tri { transform: rotate(90deg); }
+  .bh .nm { font-weight: 700; font-size: 16px; overflow-wrap: anywhere; }
+  .bh .cnt { font-size: 14px; color: var(--ink2); text-align: right; white-space: nowrap; }
+  .book.full .bh .cnt { color: var(--done); font-weight: 700; }
+  .bd { padding: 4px 18px 18px; display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--line); }
+  .chips { display: grid; grid-template-columns: repeat(auto-fill, minmax(42px, 1fr)); gap: 6px; padding-top: 12px; }
+  .chip { min-height: 38px; border-radius: 9px; border: 1px solid var(--line); background: var(--bg); font-weight: 600; font-size: 13px; color: var(--ink2); }
+  .chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .chip.on.today { background: var(--done); border-color: var(--done); }
+  .bd-f { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .bd-f .hint { font-size: 12.5px; color: var(--ink2); margin-left: auto; }
+
+  .bar-note { background: var(--warn-soft); color: var(--warn); border-radius: 12px; padding: 12px 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 14px; }
+  .bar-note .acts { display: flex; gap: 8px; margin-left: auto; }
+  .bar-note .btn { background: transparent; border-color: currentColor; color: inherit; min-height: 34px; }
+  .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 22px; background: var(--ink); color: #fff; padding: 10px 16px; border-radius: 99px; font-size: 14px; z-index: 50; }
+
+  @media (max-width: 760px) {
+    .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .pct { font-size: 46px; }
+    .total-r .left { margin-left: 0; width: 100%; }
+    .bh { grid-template-columns: 18px minmax(0, 1fr) auto; gap: 8px 10px; padding: 12px 14px; }
+    .bh .bar { grid-column: 2 / -1; grid-row: 2; }
+    .bd { padding: 4px 14px 14px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .bar i, .bh .tri { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap" id="root"></div>
+<div class="toast" id="toast" role="status" hidden></div>
+<script>
+(function () {
+  'use strict';
+
+  var G = [
+    ['구약', '모세오경', [['창세기', 50], ['출애굽기', 40], ['레위기', 27], ['민수기', 36], ['신명기', 34]]],
+    ['구약', '역사서', [['여호수아', 24], ['사사기', 21], ['룻기', 4], ['사무엘상', 31], ['사무엘하', 24], ['열왕기상', 22], ['열왕기하', 25], ['역대상', 29], ['역대하', 36], ['에스라', 10], ['느헤미야', 13], ['에스더', 10]]],
+    ['구약', '시가서', [['욥기', 42], ['시편', 150], ['잠언', 31], ['전도서', 12], ['아가', 8]]],
+    ['구약', '대선지서', [['이사야', 66], ['예레미야', 52], ['예레미야애가', 5], ['에스겔', 48], ['다니엘', 12]]],
+    ['구약', '소선지서', [['호세아', 14], ['요엘', 3], ['아모스', 9], ['오바댜', 1], ['요나', 4], ['미가', 7], ['나훔', 3], ['하박국', 3], ['스바냐', 3], ['학개', 2], ['스가랴', 14], ['말라기', 4]]],
+    ['신약', '복음서', [['마태복음', 28], ['마가복음', 16], ['누가복음', 24], ['요한복음', 21]]],
+    ['신약', '역사서', [['사도행전', 28]]],
+    ['신약', '바울서신', [['로마서', 16], ['고린도전서', 16], ['고린도후서', 13], ['갈라디아서', 6], ['에베소서', 6], ['빌립보서', 4], ['골로새서', 4], ['데살로니가전서', 5], ['데살로니가후서', 3], ['디모데전서', 6], ['디모데후서', 4], ['디도서', 3], ['빌레몬서', 1]]],
+    ['신약', '일반서신', [['히브리서', 13], ['야고보서', 5], ['베드로전서', 5], ['베드로후서', 3], ['요한일서', 5], ['요한이서', 1], ['요한삼서', 1], ['유다서', 1]]],
+    ['신약', '예언서', [['요한계시록', 22]]]
+  ];
+  var BOOKS = [], BYNAME = {}, TOT = { '구약': 0, '신약': 0 };
+  G.forEach(function (g) { g[2].forEach(function (b) { var o = { name: b[0], n: b[1], t: g[0], g: g[1] }; BOOKS.push(o); BYNAME[o.name] = o; TOT[g[0]] += o.n; }); });
+  var TOTAL = TOT['구약'] + TOT['신약'];
+
+  var KEY = 'bible-read-v1', DOW = 18 * 7;
+  var $ = function (s) { return document.querySelector(s); };
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
+  var pad = function (n) { return String(n).padStart(2, '0'); };
+  var keyOf = function (d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+  var todayKey = function () { return keyOf(new Date()); };
+  var addDays = function (k, n) { var p = k.split('-').map(Number); return keyOf(new Date(p[0], p[1] - 1, p[2] + n, 12)); };
+  var dowOf = function (k) { var p = k.split('-').map(Number); return new Date(p[0], p[1] - 1, p[2], 12).getDay(); };
+  var fmt = function (n) { return Number(n).toLocaleString('ko-KR'); };
+  var isDate = function (s) { return /^\d{4}-\d{2}-\d{2}$/.test(s); };
+  var clone = function (o) { return JSON.parse(JSON.stringify(o)); };
+
+  /* ---------- 상태 ---------- */
+  function normalize(j) {
+    var out = { v: 1, updatedAt: (j && j.updatedAt) || 0, read: {} };
+    var r = (j && j.read) || {};
+    BOOKS.forEach(function (b) {
+      var src = r[b.name]; if (!src || typeof src !== 'object') return;
+      Object.keys(src).forEach(function (c) {
+        var n = +c;
+        if (n >= 1 && n <= b.n && isDate(String(src[c]))) (out.read[b.name] = out.read[b.name] || {})[n] = src[c];
+      });
+    });
+    return out;
+  }
+  function readLocal() { try { var raw = localStorage.getItem(KEY); if (raw) return normalize(JSON.parse(raw)); } catch (e) {} return normalize(null); }
+  function writeLocal() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+  var state = readLocal();
+  var filter = '전체', recDate = todayKey(), open = {}, pendingImport = null;
+
+  /* ---------- 계산 ---------- */
+  function readOf(b) { return Object.keys(state.read[b.name] || {}).length; }
+  function stats() {
+    var s = { ot: 0, nt: 0, byDate: {} };
+    BOOKS.forEach(function (b) {
+      var m = state.read[b.name] || {};
+      Object.keys(m).forEach(function (c) { if (b.t === '구약') s.ot++; else s.nt++; s.byDate[m[c]] = (s.byDate[m[c]] || 0) + 1; });
+    });
+    s.total = s.ot + s.nt;
+    return s;
+  }
+  function streak(byDate) {
+    var k = todayKey(), n = 0;
+    if (!byDate[k]) k = addDays(k, -1);
+    while (byDate[k]) { n++; k = addDays(k, -1); }
+    return n;
+  }
+  function nextUnread() {
+    for (var i = 0; i < BOOKS.length; i++) {
+      var b = BOOKS[i], m = state.read[b.name] || {};
+      for (var c = 1; c <= b.n; c++) if (!m[c]) return { b: b, c: c };
+    }
+    return null;
+  }
+  var level = function (n) { return n <= 0 ? 0 : n <= 2 ? 1 : n <= 5 ? 2 : n <= 10 ? 3 : 4; };
+
+  /* ---------- 저장·동기화 (허브가 계정 저장소를 중계) ---------- */
+  var CL = window.__hubClaude || window.claude;
+  var remote = null, pushTimer = 0, pushing = false, dirty = false;
+  function setSaved(kind) {
+    var el = $('#saved'); if (!el) return;
+    el.className = 'saved' + (kind === 'busy' ? ' busy' : kind === 'local' ? ' local' : '');
+    el.textContent = kind === 'busy' ? '저장 중…' : kind === 'local' ? '이 기기에만 저장됨' : '저장됨';
+  }
+  var savedKind = 'local';
+  function schedulePush() { if (!remote) return; dirty = true; savedKind = 'busy'; setSaved('busy'); clearTimeout(pushTimer); pushTimer = setTimeout(push, 700); }
+  async function push() {
+    if (pushing) { pushTimer = setTimeout(push, 400); return; }
+    if (!dirty || !remote) return;
+    pushing = true; dirty = false;
+    try { await remote.set(clone(state)); if (!dirty) { savedKind = 'ok'; setSaved('ok'); } } catch (e) { savedKind = 'local'; setSaved('local'); }
+    pushing = false;
+    if (dirty) schedulePush();
+  }
+  async function initRemote() {
+    try {
+      if (!CL || !CL.use) return;
+      var db = await CL.use('db'), user = await CL.use('user');
+      if (!db || !user) return;
+      var id = await user.id(); if (!id) return;
+      remote = db.doc('data/users/' + id + '/bible-read');
+      var snap = await remote.get();
+      if (snap.exists) {
+        var r = normalize(clone(snap.data()));
+        if (r.updatedAt > state.updatedAt) { state = r; writeLocal(); savedKind = 'ok'; render(); }
+        else if (r.updatedAt < state.updatedAt) schedulePush();
+        else { savedKind = 'ok'; setSaved('ok'); }
+      } else if (state.updatedAt > 0) schedulePush();
+      else { savedKind = 'ok'; setSaved('ok'); }
+      reportToday();
+    } catch (e) { remote = null; }
+  }
+
+  /* 오늘 읽은 장 수를 허브에 알려 주면, 루틴이 그 수치로 자동 체크한다 */
+  function report(date) {
+    try { if (window.__hubReport) window.__hubReport({ date: date, value: stats().byDate[date] || 0 }); } catch (e) {}
+  }
+  function reportToday() { report(todayKey()); }
+
+  function commit(dates) {
+    state.updatedAt = Date.now(); writeLocal(); schedulePush();
+    render();
+    var seen = {}; (dates || []).concat([todayKey()]).forEach(function (d) { if (!seen[d]) { seen[d] = 1; report(d); } });
+  }
+  var toastT = 0;
+  function toast(m) { var el = $('#toast'); el.textContent = m; el.hidden = false; clearTimeout(toastT); toastT = setTimeout(function () { el.hidden = true; }, 2400); }
+
+  /* ---------- 화면 ---------- */
+  function render() {
+    var s = stats(), t = todayKey(), p = s.total / TOTAL * 100, nx = nextUnread();
+    var pctTxt = s.total === 0 ? '0' : (p < 10 ? p.toFixed(1) : String(Math.round(p)));
+    var h = '<div class="head"><h1>성경 읽기 체크</h1><div class="tools"><span class="saved' + (savedKind === 'busy' ? ' busy' : savedKind === 'local' ? ' local' : '') + '" id="saved">' + (savedKind === 'busy' ? '저장 중…' : savedKind === 'local' ? '이 기기에만 저장됨' : '저장됨') + '</span>' +
+      '<button type="button" class="btn" data-act="export" id="exportBtn" hidden>내보내기</button>' +
+      '<label class="btn">불러오기<input type="file" id="importFile" accept=".json,application/json" hidden></label></div></div>';
+    if (pendingImport) h += '<div class="bar-note" role="alert"><span>백업 파일에 ' + fmt(pendingImport.count) + '장의 기록이 있어요. 지금 기록을 이 파일로 덮어쓸까요?</span><span class="acts"><button type="button" class="btn" data-act="import-yes">덮어쓰기</button><button type="button" class="btn" data-act="import-no">취소</button></span></div>';
+
+    h += '<section class="card total"><div class="total-r"><span class="pct num">' + pctTxt + '<small>%</small></span><span class="cnt num"><b>' + fmt(s.total) + '</b> / ' + fmt(TOTAL) + '장 읽음</span><span class="left num">' + fmt(TOTAL - s.total) + '장 남음</span></div>' +
+      '<div class="bar' + (s.total === TOTAL ? ' done' : '') + '"><i style="width:' + p + '%"></i></div>' +
+      (nx ? '<div class="next"><span>다음 읽을 곳 <b>' + esc(nx.b.name) + ' ' + nx.c + '장</b></span><button type="button" class="btn sm" data-act="goto" data-b="' + esc(nx.b.name) + '">이어서 체크</button></div>' : '<div class="next"><b>성경 전체를 읽었어요.</b></div>') + '</section>';
+
+    var otp = s.ot / TOT['구약'] * 100, ntp = s.nt / TOT['신약'] * 100, st = streak(s.byDate), td = s.byDate[t] || 0;
+    h += '<div class="tiles">' +
+      '<div class="tile"><span class="lb">구약</span><span class="v num">' + otp.toFixed(1) + '%<small>' + fmt(s.ot) + '/' + fmt(TOT['구약']) + '</small></span><div class="bar sm"><i style="width:' + otp + '%"></i></div></div>' +
+      '<div class="tile"><span class="lb">신약</span><span class="v num">' + ntp.toFixed(1) + '%<small>' + fmt(s.nt) + '/' + fmt(TOT['신약']) + '</small></span><div class="bar sm"><i style="width:' + ntp + '%"></i></div></div>' +
+      '<div class="tile"><span class="lb">연속 읽기</span><span class="v num">' + st + '<small>일</small></span></div>' +
+      '<div class="tile"><span class="lb">오늘 읽은 장</span><span class="v num">' + td + '<small>장</small></span></div></div>';
+
+    var start = addDays(addDays(t, -dowOf(t)), -(DOW - 7)), cells = '';
+    for (var i = 0; i < DOW; i++) {
+      var k = addDays(start, i), n = s.byDate[k] || 0;
+      cells += k > t ? '<i class="f"></i>' : '<i class="l' + level(n) + (k === t ? ' t' : '') + '" title="' + k.slice(5).replace('-', '/') + ' · ' + n + '장"></i>';
+    }
+    h += '<section class="card"><div class="sec-t"><h2>최근 활동</h2><span>최근 18주 · 하루에 읽은 장 수</span></div><div class="heat-box"><div class="heat" role="img" aria-label="최근 18주 읽기 기록">' + cells + '</div></div>' +
+      '<div class="legend"><span>적음</span>' + [0, 1, 2, 3, 4].map(function (l) { return '<i style="background:var(--h' + l + ')"></i>'; }).join('') + '<span>많음</span></div></section>';
+
+    h += '<div class="ctl"><div class="seg" role="group" aria-label="구분">' + ['전체', '구약', '신약'].map(function (f) { return '<button type="button" data-act="filter" data-f="' + f + '" aria-pressed="' + (filter === f) + '">' + f + '</button>'; }).join('') + '</div>' +
+      '<label class="datef">기록 날짜 <input type="date" id="recDate" value="' + recDate + '" max="' + t + '"></label></div>';
+
+    h += '<div class="books">';
+    G.forEach(function (g) {
+      if (filter !== '전체' && g[0] !== filter) return;
+      h += '<div class="gh">' + g[0] + ' · ' + g[1] + '</div>';
+      g[2].forEach(function (bk) {
+        var b = BYNAME[bk[0]], m = state.read[b.name] || {}, r = Object.keys(m).length, isOpen = !!open[b.name], full = r === b.n;
+        h += '<div class="book' + (isOpen ? ' open' : '') + (full ? ' full' : '') + '" id="bk-' + esc(b.name) + '"><button type="button" class="bh" data-act="book" data-b="' + esc(b.name) + '" aria-expanded="' + isOpen + '"><span class="tri">▶</span><span class="nm">' + esc(b.name) + '</span><div class="bar sm' + (full ? ' done' : '') + '"><i style="width:' + (r / b.n * 100) + '%"></i></div><span class="cnt num">' + (full ? '✓ ' : '') + r + '/' + b.n + '</span></button>';
+        if (isOpen) {
+          h += '<div class="bd"><div class="chips">';
+          for (var c = 1; c <= b.n; c++) {
+            var d = m[c];
+            h += '<button type="button" class="chip num' + (d ? ' on' : '') + (d === t ? ' today' : '') + '" data-act="ch" data-b="' + esc(b.name) + '" data-n="' + c + '" aria-pressed="' + !!d + '" title="' + (d ? d + ' 읽음' : '아직 안 읽음') + '">' + c + '</button>';
+          }
+          h += '</div><div class="bd-f"><button type="button" class="btn sm" data-act="all" data-b="' + esc(b.name) + '">남은 장 모두 읽음</button><button type="button" class="btn sm" data-act="none" data-b="' + esc(b.name) + '">이 책 기록 지우기</button><span class="hint">체크하면 ' + recDate.slice(5).replace('-', '/') + '(으)로 기록돼요</span></div></div>';
+        }
+        h += '</div>';
+      });
+    });
+    h += '</div>';
+    $('#root').innerHTML = h;
+    updateExportBtn();
+  }
+
+  async function updateExportBtn() {
+    var b = $('#exportBtn'); if (!b) return;
+    try { var d = CL && CL.use ? await CL.use('downloads') : null; b.hidden = !d; } catch (e) { b.hidden = true; }
+  }
+
+  /* ---------- 이벤트 ---------- */
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest('[data-act]'); if (!t) return;
+    var act = t.dataset.act, bn = t.dataset.b, b = bn && BYNAME[bn];
+    if (act === 'filter') { filter = t.dataset.f; render(); }
+    else if (act === 'book') { open[bn] = !open[bn]; render(); }
+    else if (act === 'goto') {
+      if (filter !== '전체' && filter !== BYNAME[bn].t) filter = BYNAME[bn].t;
+      open[bn] = true; render();
+      var el = document.getElementById('bk-' + bn); if (el) { try { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (x) {} }
+    }
+    else if (act === 'ch') {
+      var m = state.read[bn] = state.read[bn] || {}, n = +t.dataset.n, d = recDate;
+      if (m[n]) { d = m[n]; delete m[n]; } else m[n] = recDate;
+      if (!Object.keys(m).length) delete state.read[bn];
+      commit([d]);
+    }
+    else if (act === 'all') {
+      var mm = state.read[bn] = state.read[bn] || {}, cnt = 0;
+      for (var c = 1; c <= b.n; c++) if (!mm[c]) { mm[c] = recDate; cnt++; }
+      commit([recDate]); toast(cnt + '장을 ' + recDate.slice(5).replace('-', '/') + '(으)로 기록했어요');
+    }
+    else if (act === 'none') {
+      if (t.dataset.armed !== '1') { t.dataset.armed = '1'; t.textContent = '정말 지울까요?'; return; }
+      var dates = Object.keys(state.read[bn] || {}).map(function (c) { return state.read[bn][c]; });
+      delete state.read[bn]; commit(dates);
+    }
+    else if (act === 'export') exportBackup();
+    else if (act === 'import-yes') { if (pendingImport) { var ts = state.updatedAt, old = stats().byDate; state = pendingImport.data; state.updatedAt = Math.max(Date.now(), ts + 1); pendingImport = null; commit(Object.keys(old)); toast('백업에서 복원했어요'); } }
+    else if (act === 'import-no') { pendingImport = null; render(); }
+  });
+  document.addEventListener('change', function (e) {
+    var t = e.target;
+    if (t.id === 'recDate') { var v = t.value; recDate = isDate(v) && v <= todayKey() ? v : todayKey(); render(); }
+    else if (t.id === 'importFile' && t.files && t.files[0]) {
+      var fr = new FileReader();
+      fr.onload = function () {
+        try {
+          var j = JSON.parse(String(fr.result || '')), data = normalize(j), count = 0;
+          Object.keys(data.read).forEach(function (k) { count += Object.keys(data.read[k]).length; });
+          if (!j || typeof j.read !== 'object') throw new Error('no read');
+          pendingImport = { data: data, count: count }; render();
+        } catch (err) { toast('읽을 수 없는 파일이에요. 내보내기로 저장한 파일을 골라 주세요.'); }
+      };
+      fr.readAsText(t.files[0]);
+    }
+  });
+  async function exportBackup() {
+    try {
+      var d = await CL.use('downloads');
+      await d.save({ filename: 'bible-read-' + todayKey() + '.json', data: JSON.stringify(state, null, 1) });
+      toast('백업 파일을 저장했어요');
+    } catch (e) { if (!e || e.code !== 'declined') toast('이 화면에서는 파일을 저장할 수 없어요'); }
+  }
+
+  render();
+  initRemote();
+  reportToday();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>독서 체크</title>
+<script>
+/* 허브 안에서 열렸을 때: 허브(부모 화면)에게 메시지로 부탁해서 계정 저장소를 쓰고, 다른 영역의 도구로 이동한다.
+   (My Tools Hub의 다른 도구들과 같은 방식) */
+(function () {
+  if (window.parent === window) return;
+  document.documentElement.classList.add('emb');
+  var P = window.parent, seq = 0, pending = {}, subs = {};
+  function post(m) { m.__hub = 1; P.postMessage(m, '*'); }
+  function call(cap, op, args) {
+    return new Promise(function (res, rej) {
+      var id = ++seq; pending[id] = { res: res, rej: rej };
+      post({ id: id, cap: cap, op: op, args: args || [] });
+    });
+  }
+  function docSnap(d) {
+    var body = d.data;
+    return { id: d.id, exists: !!d.exists, metadata: d.metadata || {},
+      data: function () { return body == null ? undefined : JSON.parse(JSON.stringify(body)); } };
+  }
+  function wrap(s) {
+    if (!s) return s;
+    if (s.kind === 'doc') return docSnap(s);
+    var docs = (s.docs || []).map(docSnap);
+    return { docs: docs, size: docs.length, empty: !docs.length, metadata: s.metadata || {}, docChanges: function () { return []; } };
+  }
+  window.addEventListener('message', function (e) {
+    if (e.source !== P) return;
+    var m = e.data; if (!m || !m.__hubr) return;
+    if (m.sub) { var s = subs[m.sub]; if (!s) return; if (m.err) { if (s.err) s.err(m.err); } else s.next(wrap(m.snap)); return; }
+    var p = pending[m.id]; if (!p) return; delete pending[m.id];
+    if (m.err) p.rej(m.err); else p.res(m.val);
+  });
+  function subscribe(kind, path, lim, next, err) {
+    var id = ++seq; subs[id] = { next: next, err: err };
+    post({ sub: id, kind: kind, path: path, lim: lim || null });
+    return function () { delete subs[id]; post({ unsub: id }); };
+  }
+  function docRef(path) {
+    return {
+      id: path.split('/').pop(), path: path,
+      get: function () { return call('db', 'docGet', [path]).then(wrap); },
+      set: function (d) { return call('db', 'docSet', [path, d]); },
+      update: function (d) { return call('db', 'docUpdate', [path, d]); },
+      'delete': function () { return call('db', 'docDel', [path]); },
+      collection: function (sub) { return colRef(path + '/' + sub); },
+      onSnapshot: function (next, err) { return subscribe('doc', path, null, next, err); }
+    };
+  }
+  function colRef(path, lim) {
+    return {
+      path: path,
+      doc: function (id) { return docRef(path + '/' + (id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 8)))); },
+      limit: function (n) { return colRef(path, n); },
+      get: function () { return call('db', 'colGet', [path, lim || null]).then(wrap); },
+      onSnapshot: function (next, err) { return subscribe('col', path, lim, next, err); }
+    };
+  }
+  var capsP = null;
+  function caps() {
+    if (!capsP) capsP = new Promise(function (res) {
+      var done = false;
+      call('hub', 'caps', []).then(function (c) { done = true; res(c || {}); }, function () { done = true; res({}); });
+      setTimeout(function () { if (!done) res({}); }, 12000);
+    });
+    return capsP;
+  }
+  var api = {
+    use: function (name) {
+      return caps().then(function (c) {
+        if (!c[name]) return null;
+        if (name === 'db') return { doc: docRef, collection: function (p) { return colRef(p); } };
+        if (name === 'user') return {
+          id: function () { return call('user', 'id', []); },
+          isOwner: function () { return false; }, canEdit: function () { return false; }, can: function () { return null; }
+        };
+        if (name === 'downloads') return { save: function (r) { return call('downloads', 'save', [{ filename: r.filename, data: r.data }]); } };
+        return null;
+      });
+    }
+  };
+  window.__hubClaude = api;
+  window.__hubNav = function (key) { post({ nav: key }); };
+  window.__hubTools = function () { return call('hub', 'tools', []); };
+  // 도구가 "오늘 이만큼 했다"는 수치를 알려 주면 허브가 계정에 남기고, 루틴이 그 수치로 자동 체크한다
+  window.__hubReport = function (r) { post({ report: r }); };
+})();
+</script>
+<style>
+  /* Layout: 오늘 읽기(목표·연속·한 주) → 숫자 → 다음 기념일 → 활동 → 내 책장 → 메모 모음. 읽은 사실이 한눈에 보이고, 오늘 한 번만 누르면 되게 한다. */
+  :root {
+    --bg: #f6f6f8; --card: #ffffff; --line: #e8e9ee; --track: #e6e7ec;
+    --ink: #1a1b1f; --ink2: #6b6e7a; --accent: #4767d6; --accent-ink: #ffffff;
+    --accent-soft: #eaeffc; --done: #2f9e5f; --done-soft: #e3f5ea; --warn: #b4540a; --warn-soft: #fdf1e3;
+    --h0: #e8e9ee; --h1: #cfdbf6; --h2: #9db5ec; --h3: #6b8ae0; --h4: #3f5fc4;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", Pretendard, Roboto, sans-serif;
+    --serif: "Noto Serif KR", "Nanum Myeongjo", "Apple Myungjo", Georgia, serif;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 var(--font); }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .num { font-variant-numeric: tabular-nums; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 22px max(18px, env(safe-area-inset-left, 0px)) 48px max(18px, env(safe-area-inset-right, 0px)); display: flex; flex-direction: column; gap: 16px; }
+
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 10px 14px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: -.01em; }
+  .tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .saved { font-size: 12.5px; font-weight: 600; color: var(--done); }
+  .saved.busy { color: var(--ink2); } .saved.local { color: var(--warn); }
+  .btn { min-height: 40px; padding: 0 16px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); font-weight: 600; font-size: 14px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
+  .btn:hover { border-color: #c9cbd4; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn.done { background: var(--done); border-color: var(--done); color: #fff; }
+  .btn.sm { min-height: 34px; padding: 0 12px; font-size: 13px; }
+  .btn.danger { color: var(--warn); }
+  .linkbtn { background: none; border: 0; padding: 0; color: var(--accent); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 20px; box-shadow: 0 1px 2px rgba(20, 22, 30, .04); }
+  .bar { height: 10px; border-radius: 99px; background: var(--track); overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 99px; background: var(--accent); transition: width .2s; }
+  .bar.done i { background: var(--done); } .bar.sm { height: 6px; }
+
+  /* 오늘 */
+  .today { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px 20px; align-items: center; }
+  .today .lb { font-size: 13px; color: var(--ink2); }
+  .today .big { font-size: 46px; font-weight: 700; line-height: 1.05; letter-spacing: -.02em; }
+  .today .big small { font-size: 16px; font-weight: 600; color: var(--ink2); margin-left: 4px; letter-spacing: 0; }
+  .today .msg { margin: 6px 0 0; font-size: 14.5px; line-height: 1.55; }
+  .today .bar { grid-column: 1 / -1; }
+  .week { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+  .wd { display: flex; flex-direction: column; align-items: center; gap: 5px; font-size: 12px; color: var(--ink2); }
+  .wd i { width: 100%; max-width: 40px; aspect-ratio: 1; border-radius: 50%; background: var(--track); display: grid; place-items: center; font-style: normal; font-weight: 700; font-size: 12px; color: transparent; }
+  .wd.on i { background: var(--done); color: #fff; }
+  .wd.now i { outline: 2px solid var(--ink); outline-offset: 2px; }
+  .wd.on.part i { background: var(--h3); }
+  .today .act { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; }
+  .today .act .btn.primary { flex: 1 1 180px; min-height: 48px; font-size: 15px; }
+
+  .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  .tile { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px 18px; display: flex; flex-direction: column; gap: 4px; min-width: 0; box-shadow: 0 1px 2px rgba(20, 22, 30, .04); }
+  .tile .lb { font-size: 13px; color: var(--ink2); }
+  .tile .v { font-size: 28px; font-weight: 700; line-height: 1.15; }
+  .tile .v small { font-size: 13px; font-weight: 600; color: var(--ink2); margin-left: 3px; }
+  .tile .sub { font-size: 12px; color: var(--ink2); }
+
+  .sec-t { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  .sec-t h2 { margin: 0; font-size: 16px; } .sec-t span { font-size: 12.5px; color: var(--ink2); }
+  .ms { display: flex; flex-direction: column; gap: 12px; }
+  .ms-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .badges { display: flex; flex-wrap: wrap; gap: 6px; }
+  .badge { font-size: 12.5px; font-weight: 600; padding: 3px 10px; border-radius: 99px; background: var(--done-soft); color: #1e6e43; }
+  .badge.off { background: var(--bg); color: var(--ink2); font-weight: 500; }
+
+  .heat-box { overflow-x: auto; }
+  .heat { display: grid; grid-template-rows: repeat(7, 16px); grid-auto-flow: column; grid-auto-columns: 16px; gap: 4px; width: max-content; }
+  .heat i { border-radius: 4px; background: var(--h0); }
+  .heat i.l1 { background: var(--h1); } .heat i.l2 { background: var(--h2); } .heat i.l3 { background: var(--h3); } .heat i.l4 { background: var(--h4); }
+  .heat i.f { visibility: hidden; } .heat i.t { outline: 2px solid var(--ink); outline-offset: 1px; }
+  .legend { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 12px; color: var(--ink2); }
+  .legend i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; }
+
+  .seg { display: inline-flex; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 3px; gap: 2px; }
+  .seg button { border: 0; background: none; min-height: 34px; padding: 0 14px; border-radius: 9px; font-weight: 600; color: var(--ink2); font-size: 13.5px; }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+  .shelf-h { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  .books { display: flex; flex-direction: column; }
+  .bk { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 14px 4px; background: none; border: 0; border-top: 1px solid var(--line); text-align: left; width: 100%; }
+  .books .bk:first-child { border-top: 0; }
+  .bk:hover { background: var(--bg); }
+  .cv { width: 48px; height: 66px; border-radius: 4px 8px 8px 4px; display: grid; place-items: center; color: rgba(255,255,255,.95); font: 700 20px var(--serif); box-shadow: inset 4px 0 0 rgba(0,0,0,.18); }
+  .bi { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .bi b { font-size: 15.5px; overflow-wrap: anywhere; }
+  .bi small { color: var(--ink2); font-size: 12.5px; }
+  .bi .bar { margin: 3px 0; }
+  .bs { font-size: 13px; font-weight: 700; text-align: right; white-space: nowrap; }
+  .stars { color: #d99a00; letter-spacing: 1px; }
+  .empty { padding: 26px 12px; text-align: center; color: var(--ink2); }
+  .empty b { display: block; color: var(--ink); font-size: 16px; margin-bottom: 4px; }
+  .empty .btn { margin-top: 12px; }
+
+  .search { width: 100%; min-height: 40px; border: 1px solid var(--line); border-radius: 10px; padding: 0 12px; background: var(--bg); margin-bottom: 8px; }
+  .memos { display: flex; flex-direction: column; }
+  .mm { padding: 12px 2px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 3px; }
+  .memos .mm:first-child { border-top: 0; }
+  .mm .t { font-size: 12.5px; color: var(--ink2); display: flex; flex-wrap: wrap; gap: 2px 10px; }
+  .mm .t b { color: var(--ink); font-weight: 600; }
+  .mm p { margin: 0; font-family: var(--serif); font-size: 15.5px; line-height: 1.65; overflow-wrap: anywhere; }
+  .mm.rv p { color: #6a4a00; }
+
+  /* 시트 */
+  .scrim { position: fixed; inset: 0; z-index: 40; background: rgba(15, 17, 24, .45); display: flex; align-items: flex-end; justify-content: center; }
+  .sheet { background: var(--card); width: 100%; max-width: 560px; max-height: 94%; overflow-y: auto; border-radius: 20px 20px 0 0; padding: 20px max(18px, env(safe-area-inset-left, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)); display: flex; flex-direction: column; gap: 14px; }
+  .sheet h2 { margin: 0; font-size: 18px; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field > label, .field > .lb { font-size: 13px; font-weight: 600; }
+  .field input, .field select, .field textarea { min-height: 42px; border: 1px solid var(--line); border-radius: 10px; padding: 0 12px; background: var(--bg); width: 100%; }
+  .field textarea { padding: 10px 12px; min-height: 76px; resize: vertical; line-height: 1.55; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { min-height: 36px; padding: 0 14px; border-radius: 99px; border: 1px solid var(--line); background: var(--card); font-weight: 600; font-size: 13.5px; }
+  .chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); }
+  .starp { display: flex; gap: 4px; }
+  .starp button { width: 42px; height: 42px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); font-size: 20px; color: #c5c7d0; }
+  .starp button.on { color: #d99a00; border-color: #e9c46a; background: #fff8e1; }
+  .sheet-f { display: flex; gap: 8px; flex-wrap: wrap; }
+  .sheet-f .sp { flex: 1; }
+  .msg { font-size: 13px; margin: 0; min-height: 18px; color: var(--warn); }
+  .help { font-size: 12.5px; color: var(--ink2); margin: 0; }
+  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+  .fact { background: var(--bg); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
+  .fact span { font-size: 12px; color: var(--ink2); } .fact b { font-size: 15px; }
+  .logs { display: flex; flex-direction: column; }
+  .lg { display: grid; grid-template-columns: 62px minmax(0, 1fr) auto; gap: 10px; align-items: baseline; padding: 10px 0; border-top: 1px solid var(--line); background: none; border-left: 0; border-right: 0; border-bottom: 0; text-align: left; width: 100%; }
+  .logs .lg:first-child { border-top: 0; }
+  .lg .d { font-size: 12.5px; color: var(--ink2); }
+  .lg .tx { font-family: var(--serif); font-size: 14.5px; line-height: 1.55; overflow-wrap: anywhere; }
+  .lg .tx.none { font-family: var(--font); color: var(--ink2); font-size: 13px; }
+  .lg .mn { font-size: 13px; font-weight: 700; white-space: nowrap; }
+  .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 22px; background: var(--ink); color: #fff; padding: 11px 18px; border-radius: 16px; font-size: 14px; z-index: 60; max-width: calc(100% - 32px); text-align: center; line-height: 1.5; }
+  .bar-note { background: var(--warn-soft); color: var(--warn); border-radius: 12px; padding: 12px 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 14px; }
+  .bar-note .acts { display: flex; gap: 8px; margin-left: auto; }
+  .bar-note .btn { background: transparent; border-color: currentColor; color: inherit; min-height: 34px; }
+
+  @media (min-width: 700px) { .scrim { align-items: center; } .sheet { border-radius: 20px; } }
+  @media (max-width: 760px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .today .big { font-size: 40px; } }
+  @media (max-width: 420px) { .row2 { grid-template-columns: 1fr; } }
+  @media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap" id="root"></div>
+<div class="scrim" id="scrim" hidden><div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title"></div></div>
+<div class="toast" id="toast" role="status" hidden></div>
+<script>
+(function () {
+  'use strict';
+
+  var KEY = 'reading-check-v1';
+  var STREAKS = [3, 7, 14, 21, 30, 50, 66, 100, 200, 365], BOOKS_AT = [1, 3, 5, 10, 20, 30, 50], HOURS_AT = [10, 30, 50, 100, 200, 500];
+  var DOW = ['일', '월', '화', '수', '목', '금', '토'];
+  var STATUS = { reading: '읽는 중', want: '읽고 싶은', done: '완독' };
+  var $ = function (s) { return document.querySelector(s); };
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
+  var pad = function (n) { return String(n).padStart(2, '0'); };
+  var keyOf = function (d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+  var parseKey = function (k) { var p = k.split('-').map(Number); return new Date(p[0], p[1] - 1, p[2], 12); };
+  var todayKey = function () { return keyOf(new Date()); };
+  var addDays = function (k, n) { var d = parseKey(k); d.setDate(d.getDate() + n); return keyOf(d); };
+  var dowOf = function (k) { return parseKey(k).getDay(); };
+  var dayDiff = function (a, b) { return Math.round((parseKey(b) - parseKey(a)) / 864e5); };
+  var dotted = function (k) { return k.replace(/-/g, '.'); };
+  var fmt = function (n) { return Number(n).toLocaleString('ko-KR'); };
+  var isDate = function (s) { return /^\d{4}-\d{2}-\d{2}$/.test(s); };
+  var clone = function (o) { return JSON.parse(JSON.stringify(o)); };
+  var uid = function (p) { return p + Math.random().toString(36).slice(2, 9); };
+  var hm = function (min) { var h = Math.floor(min / 60), m = min % 60; return h ? h + '시간' + (m ? ' ' + m + '분' : '') : m + '분'; };
+
+  /* ---------- 상태 ---------- */
+  function normalize(j) {
+    j = j || {};
+    var goal = j.goal || {};
+    var out = { v: 1, updatedAt: j.updatedAt || 0, goal: { min: Math.max(1, +goal.min || 20), year: Math.max(1, +goal.year || 12) }, books: [], logs: [] };
+    (Array.isArray(j.books) ? j.books : []).forEach(function (b) {
+      if (!b || !b.title) return;
+      out.books.push({
+        id: String(b.id || uid('b')), title: String(b.title).slice(0, 120), author: String(b.author || '').slice(0, 80),
+        pages: Math.max(0, Math.floor(+b.pages || 0)), cur: Math.max(0, Math.floor(+b.cur || 0)),
+        status: STATUS[b.status] ? b.status : 'reading', start: isDate(b.start || '') ? b.start : '', end: isDate(b.end || '') ? b.end : '',
+        rating: Math.min(5, Math.max(0, Math.floor(+b.rating || 0))), review: String(b.review || '').slice(0, 300)
+      });
+    });
+    var ids = {}; out.books.forEach(function (b) { ids[b.id] = 1; });
+    (Array.isArray(j.logs) ? j.logs : []).forEach(function (l) {
+      if (!l || !ids[l.book] || !isDate(l.date || '') || !(+l.min >= 1)) return;
+      out.logs.push({ id: String(l.id || uid('l')), book: l.book, date: l.date, min: Math.floor(+l.min), page: Math.max(0, Math.floor(+l.page || 0)), memo: String(l.memo || '').slice(0, 300) });
+    });
+    return out;
+  }
+  function readLocal() { try { var raw = localStorage.getItem(KEY); if (raw) return normalize(JSON.parse(raw)); } catch (e) {} return normalize(null); }
+  function writeLocal() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+  var state = readLocal();
+  var shelf = 'reading', memoQ = '', memoMore = 50, sheet = null, pendingImport = null;
+  var book = function (id) { return state.books.filter(function (b) { return b.id === id; })[0]; };
+
+  /* ---------- 계산 ---------- */
+  function minutesByDate() { var m = {}; state.logs.forEach(function (l) { m[l.date] = (m[l.date] || 0) + l.min; }); return m; }
+  function streaks(m) {
+    var k = todayKey(), n = 0;
+    if (!(m[k] > 0)) k = addDays(k, -1);
+    while (m[k] > 0) { n++; k = addDays(k, -1); }
+    var ds = Object.keys(m).filter(function (d) { return m[d] > 0; }).sort(), best = 0, run = 0, prev = null;
+    ds.forEach(function (d) { run = prev && dayDiff(prev, d) === 1 ? run + 1 : 1; if (run > best) best = run; prev = d; });
+    return { cur: n, best: best };
+  }
+  var level = function (n) { return n <= 0 ? 0 : n < 15 ? 1 : n < 30 ? 2 : n < 60 ? 3 : 4; };
+  function bookLogs(id) { return state.logs.filter(function (l) { return l.book === id; }).sort(function (a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : 0; }); }
+  function bookMinutes(id) { return state.logs.reduce(function (s, l) { return l.book === id ? s + l.min : s; }, 0); }
+  function period(b) {
+    if (b.status === 'want') return '읽고 싶은 책';
+    if (!b.start) return b.status === 'done' ? '완독' : '읽는 중';
+    if (b.status === 'done') return dotted(b.start) + ' ~ ' + dotted(b.end || b.start) + ' · ' + (dayDiff(b.start, b.end || b.start) + 1) + '일 걸림';
+    return dotted(b.start) + ' ~ 진행 중 · ' + (dayDiff(b.start, todayKey()) + 1) + '일째';
+  }
+  function eta(b) {
+    if (b.status !== 'reading' || !b.pages || b.cur <= 0 || b.cur >= b.pages || !b.start) return '';
+    var days = Math.max(1, dayDiff(b.start, todayKey()) + 1), pace = b.cur / days;
+    var left = Math.ceil((b.pages - b.cur) / pace);
+    return { pace: Math.round(pace * 10) / 10, date: addDays(todayKey(), left), left: left };
+  }
+  var hue = function (s) { var h = 0; for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360; return h; };
+  var cover = function (b) { return '<span class="cv" style="background:hsl(' + hue(b.title) + ' 38% 36%)">' + esc(Array.from(b.title)[0] || '책') + '</span>'; };
+  var stars = function (n) { return '<span class="stars" aria-label="별점 ' + n + '점">' + '★'.repeat(n) + '☆'.repeat(5 - n) + '</span>'; };
+
+  /* ---------- 저장·동기화 (허브가 저장소를 중계) ---------- */
+  var CL = window.__hubClaude || window.claude;
+  var remote = null, pushTimer = 0, pushing = false, dirty = false, savedKind = 'local';
+  function setSaved() {
+    var el = $('#saved'); if (!el) return;
+    el.className = 'saved' + (savedKind === 'busy' ? ' busy' : savedKind === 'local' ? ' local' : '');
+    el.textContent = savedKind === 'busy' ? '저장 중…' : savedKind === 'local' ? '이 기기에만 저장됨' : '저장됨';
+  }
+  function schedulePush() { if (!remote) return; dirty = true; savedKind = 'busy'; setSaved(); clearTimeout(pushTimer); pushTimer = setTimeout(push, 700); }
+  async function push() {
+    if (pushing) { pushTimer = setTimeout(push, 400); return; }
+    if (!dirty || !remote) return;
+    pushing = true; dirty = false;
+    try { await remote.set(clone(state)); if (!dirty) { savedKind = 'ok'; setSaved(); } } catch (e) { savedKind = 'local'; setSaved(); }
+    pushing = false;
+    if (dirty) schedulePush();
+  }
+  async function initRemote() {
+    try {
+      if (!CL || !CL.use) return;
+      var db = await CL.use('db'), user = await CL.use('user');
+      if (!db || !user) return;
+      var id = await user.id(); if (!id) return;
+      remote = db.doc('data/users/' + id + '/reading-check');
+      var snap = await remote.get();
+      if (snap.exists) {
+        var r = normalize(clone(snap.data()));
+        if (r.updatedAt > state.updatedAt) { state = r; writeLocal(); savedKind = 'ok'; render(); }
+        else if (r.updatedAt < state.updatedAt) schedulePush();
+        else { savedKind = 'ok'; setSaved(); }
+      } else if (state.updatedAt > 0) schedulePush();
+      else { savedKind = 'ok'; setSaved(); }
+      report(todayKey());
+    } catch (e) { remote = null; }
+  }
+  /* 그날 읽은 시간(분)을 허브에 알려 주면, 루틴이 그 수치로 자동 체크한다 */
+  function report(date) { try { if (window.__hubReport) window.__hubReport({ date: date, value: minutesByDate()[date] || 0 }); } catch (e) {} }
+  function commit(dates) {
+    state.updatedAt = Date.now(); writeLocal(); schedulePush(); render();
+    var seen = {}; (dates || []).concat([todayKey()]).forEach(function (d) { if (!seen[d]) { seen[d] = 1; report(d); } });
+  }
+  var toastT = 0;
+  function toast(m, ms) { var el = $('#toast'); el.textContent = m; el.hidden = false; clearTimeout(toastT); toastT = setTimeout(function () { el.hidden = true; }, ms || 3200); }
+
+  /* ---------- 화면 ---------- */
+  function todayMessage(min, streak) {
+    var g = state.goal.min;
+    if (min >= g) return '오늘 목표를 채웠어요. ' + (streak.cur > 1 ? streak.cur + '일째 이어 가고 있어요.' : '내일도 이어 가요.');
+    if (min > 0) return '목표까지 ' + (g - min) + '분 남았어요. 조금만 더 읽어 볼까요?';
+    if (!state.books.some(function (b) { return b.status === 'reading'; })) return state.books.length ? '지금 읽는 책이 없어요. 읽고 싶은 책 중 하나를 골라 시작해 보세요.' : '첫 책을 추가하고 오늘 5분만 읽어 보세요.';
+    if (streak.cur > 0) return streak.cur + '일 연속으로 읽는 중이에요. 오늘은 5분만 읽어도 기록이 이어져요.';
+    return '시작하기 가장 좋은 날은 오늘이에요. 한 쪽, 5분이면 충분해요.';
+  }
+  function render() {
+    var t = todayKey(), m = minutesByDate(), st = streaks(m), tm = m[t] || 0, g = state.goal.min;
+    var h = '<div class="head"><h1>독서 체크</h1><div class="tools"><span class="saved" id="saved"></span>' +
+      '<button type="button" class="btn sm" data-act="settings">목표 설정</button>' +
+      '<button type="button" class="btn sm" data-act="export" id="exportBtn" hidden>내보내기</button>' +
+      '<label class="btn sm">불러오기<input type="file" id="importFile" accept=".json,application/json" hidden></label></div></div>';
+    if (pendingImport) h += '<div class="bar-note" role="alert"><span>백업 파일에 책 ' + pendingImport.books + '권, 기록 ' + pendingImport.logs + '개가 있어요. 지금 기록을 덮어쓸까요?</span><span class="acts"><button type="button" class="btn" data-act="import-yes">덮어쓰기</button><button type="button" class="btn" data-act="import-no">취소</button></span></div>';
+
+    /* 오늘 */
+    var mon = addDays(t, -((dowOf(t) + 6) % 7)), wk = '';
+    for (var i = 0; i < 7; i++) {
+      var k = addDays(mon, i), mm = m[k] || 0, cls = (mm > 0 ? ' on' : '') + (mm > 0 && mm < g ? ' part' : '') + (k === t ? ' now' : '');
+      wk += '<div class="wd' + cls + '"><i>' + (mm > 0 ? '✓' : '') + '</i>' + DOW[dowOf(k)] + '</div>';
+    }
+    h += '<section class="card today"><div><div class="lb">오늘 읽은 시간</div><div class="big num">' + tm + '<small>/ ' + g + '분</small></div><p class="msg" style="color:var(--ink)">' + esc(todayMessage(tm, st)) + '</p></div>' +
+      '<div class="bar' + (tm >= g ? ' done' : '') + '" style="min-width:0;grid-column:1/-1"><i style="width:' + Math.min(100, tm / g * 100) + '%"></i></div>' +
+      '<div class="week" aria-label="이번 주 읽은 날">' + wk + '</div>' +
+      '<div class="act"><button type="button" class="btn primary" data-act="log">' + (tm > 0 ? '더 기록하기' : '오늘 읽은 것 기록하기') + '</button></div></section>';
+
+    /* 숫자 */
+    var month = t.slice(0, 7), mDays = Object.keys(m).filter(function (d) { return d.indexOf(month) === 0 && m[d] > 0; }).length;
+    var yr = t.slice(0, 4), doneYr = state.books.filter(function (b) { return b.status === 'done' && (b.end || '').indexOf(yr) === 0; }).length;
+    var weekMin = 0; for (var j = 0; j < 7; j++) weekMin += m[addDays(mon, j)] || 0;
+    h += '<div class="tiles">' +
+      '<div class="tile"><span class="lb">연속 읽은 날</span><span class="v num">' + st.cur + '<small>일</small></span><span class="sub">최장 ' + st.best + '일</span></div>' +
+      '<div class="tile"><span class="lb">이번 달 읽은 날</span><span class="v num">' + mDays + '<small>일</small></span><span class="sub">이번 주 ' + hm(weekMin) + '</span></div>' +
+      '<div class="tile"><span class="lb">올해 완독</span><span class="v num">' + doneYr + '<small>/ ' + state.goal.year + '권</small></span><span class="sub">' + (doneYr >= state.goal.year ? '목표를 달성했어요' : (state.goal.year - doneYr) + '권 남음') + '</span></div>' +
+      '<div class="tile"><span class="lb">지금까지 읽은 시간</span><span class="v num">' + (function (mn) { return mn >= 60 ? Math.floor(mn / 60) + '<small>시간 ' + (mn % 60) + '분</small>' : mn + '<small>분</small>'; })(state.logs.reduce(function (s, l) { return s + l.min; }, 0)) + '</span><span class="sub">기록 ' + state.logs.length + '번</span></div></div>';
+
+    /* 다음 기념일 */
+    var total = state.logs.reduce(function (s, l) { return s + l.min; }, 0), doneAll = state.books.filter(function (b) { return b.status === 'done'; }).length;
+    var nextS = STREAKS.filter(function (x) { return x > st.cur; })[0], bd = [];
+    STREAKS.forEach(function (x) { bd.push([x + '일 연속', st.best >= x]); });
+    BOOKS_AT.forEach(function (x) { bd.push([x + '권 완독', doneAll >= x]); });
+    HOURS_AT.forEach(function (x) { bd.push([x + '시간 독서', total >= x * 60]); });
+    var got = bd.filter(function (x) { return x[1]; }), nextB = BOOKS_AT.filter(function (x) { return x > doneAll; })[0];
+    h += '<section class="card ms"><div class="sec-t" style="margin:0"><h2>다음 기념일</h2><span>모은 기념 ' + got.length + '개</span></div>' +
+      (nextS ? '<div><div class="ms-row"><b>' + nextS + '일 연속 읽기</b><span class="num" style="color:var(--ink2)">' + st.cur + ' / ' + nextS + '일 · ' + (nextS - st.cur) + '일 남음</span></div><div class="bar" style="margin-top:8px"><i style="width:' + (st.cur / nextS * 100) + '%"></i></div></div>' : '') +
+      (nextB ? '<div class="ms-row"><b>' + nextB + '권째 완독</b><span class="num" style="color:var(--ink2)">' + doneAll + ' / ' + nextB + '권</span></div>' : '') +
+      '<div class="badges">' + (got.length ? got.map(function (x) { return '<span class="badge">' + x[0] + '</span>'; }).join('') : '<span class="badge off">첫 기념을 기다리는 중</span>') + '</div></section>';
+
+    /* 활동 */
+    var start = addDays(addDays(t, -dowOf(t)), -(18 * 7 - 7)), cells = '';
+    for (var c = 0; c < 18 * 7; c++) {
+      var kk = addDays(start, c), n = m[kk] || 0;
+      cells += kk > t ? '<i class="f"></i>' : '<i class="l' + level(n) + (kk === t ? ' t' : '') + '" title="' + kk.slice(5).replace('-', '/') + ' · ' + n + '분"></i>';
+    }
+    h += '<section class="card"><div class="sec-t"><h2>최근 활동</h2><span>최근 18주 · 하루 읽은 시간</span></div><div class="heat-box"><div class="heat" role="img" aria-label="최근 18주 독서 기록">' + cells + '</div></div>' +
+      '<div class="legend"><span>적음</span>' + [0, 1, 2, 3, 4].map(function (l) { return '<i style="background:var(--h' + l + ')"></i>'; }).join('') + '<span>많음</span></div></section>';
+
+    /* 책장 */
+    var cnt = { reading: 0, want: 0, done: 0 }; state.books.forEach(function (b) { cnt[b.status]++; });
+    var list = state.books.filter(function (b) { return b.status === shelf; });
+    list.sort(function (a, b) { return shelf === 'done' ? (a.end < b.end ? 1 : -1) : shelf === 'reading' ? ((b.start || '') > (a.start || '') ? 1 : -1) : 0; });
+    h += '<section class="card"><div class="shelf-h"><div class="seg" role="group" aria-label="책장">' +
+      ['reading', 'want', 'done'].map(function (s) { return '<button type="button" data-act="shelf" data-s="' + s + '" aria-pressed="' + (shelf === s) + '">' + STATUS[s] + ' ' + cnt[s] + '</button>'; }).join('') +
+      '</div><button type="button" class="btn sm primary" data-act="add-book">책 추가</button></div>';
+    if (!list.length) h += '<div class="empty"><b>' + (shelf === 'reading' ? '읽는 중인 책이 없어요' : shelf === 'want' ? '읽고 싶은 책이 비어 있어요' : '아직 완독한 책이 없어요') + '</b>' + (shelf === 'done' ? '한 권을 끝내면 이곳에 기간과 한줄평이 남아요.' : '책을 추가해 시작해 보세요.') + '</div>';
+    else h += '<div class="books">' + list.map(function (b) {
+      var pr = b.pages ? Math.min(100, b.cur / b.pages * 100) : 0;
+      return '<button type="button" class="bk" data-act="open-book" data-id="' + b.id + '">' + cover(b) + '<span class="bi"><b>' + esc(b.title) + '</b><small>' + esc(b.author || '저자 미입력') + (b.pages ? ' · ' + fmt(b.pages) + '쪽' : '') + '</small>' +
+        (b.status === 'reading' ? '<span class="bar sm"><i style="width:' + pr + '%"></i></span>' : '') + '<small>' + esc(period(b)) + '</small></span>' +
+        '<span class="bs num">' + (b.status === 'done' ? (b.rating ? stars(b.rating) : '') : b.status === 'reading' ? (b.pages ? Math.round(pr) + '%' : (b.cur ? b.cur + '쪽' : '')) : '') + '</span></button>';
+    }).join('') + '</div>';
+    h += '</section>';
+
+    /* 메모 모음 */
+    var notes = [];
+    state.logs.forEach(function (l) { if (l.memo) { var b = book(l.book); notes.push({ date: l.date, title: b.title, text: l.memo, min: l.min, id: b.id }); } });
+    state.books.forEach(function (b) { if (b.review) notes.push({ date: b.end || b.start || '', title: b.title, text: b.review, rv: 1, id: b.id }); });
+    notes.sort(function (a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : 0; });
+    var q = memoQ.toLowerCase(), shown = notes.filter(function (n) { return !q || (n.title + ' ' + n.text).toLowerCase().indexOf(q) >= 0; });
+    h += '<section class="card"><div class="sec-t"><h2>독서 메모</h2><span>' + notes.length + '개 · 읽을수록 쌓여요</span></div>' +
+      (notes.length ? '<input type="search" class="search" id="memoQ" placeholder="메모·책 제목 검색" value="' + esc(memoQ) + '" aria-label="메모 검색" autocomplete="off">' : '') +
+      '<div class="memos" id="memos">' + memosHtml(shown) + '</div></section>';
+
+    $('#root').innerHTML = h;
+    setSaved(); updateExportBtn();
+  }
+  function memosHtml(shown) {
+    if (!shown.length) return '<div class="empty">' + (state.logs.some(function (l) { return l.memo; }) ? '조건에 맞는 메모가 없어요.' : '기록할 때 한 줄 메모를 남기면 여기에 모여요.') + '</div>';
+    return shown.slice(0, memoMore).map(function (n) {
+      return '<div class="mm' + (n.rv ? ' rv' : '') + '"><div class="t"><span>' + dotted(n.date) + '</span><b>' + esc(n.title) + '</b>' + (n.rv ? '<span>한줄평</span>' : '<span>' + n.min + '분</span>') + '</div><p>' + esc(n.text) + '</p></div>';
+    }).join('') + (shown.length > memoMore ? '<div class="empty"><button type="button" class="linkbtn" data-act="more-memo">더 보기 (' + (shown.length - memoMore) + ')</button></div>' : '');
+  }
+
+  /* ---------- 시트 ---------- */
+  function openSheet(s) { sheet = s; drawSheet(); $('#scrim').hidden = false; }
+  function closeSheet() { sheet = null; $('#scrim').hidden = true; }
+  function drawSheet() {
+    var s = sheet, h = '', b, t = todayKey();
+    if (s.type === 'log') {
+      var cand = state.books.filter(function (x) { return x.status !== 'done'; });
+      var lg = s.id ? state.logs.filter(function (l) { return l.id === s.id; })[0] : null;
+      var sel = lg ? lg.book : (s.book && book(s.book) ? s.book : (cand.filter(function (x) { return x.status === 'reading'; })[0] || cand[0] || {}).id);
+      if (lg && !cand.some(function (x) { return x.id === lg.book; })) cand = cand.concat([book(lg.book)]);
+      if (!cand.length) { h = '<h2 id="sheet-title">기록할 책이 없어요</h2><p class="help">먼저 책을 추가해 주세요.</p><div class="sheet-f"><button type="button" class="btn primary" data-act="add-book">책 추가</button><button type="button" class="btn" data-act="close">닫기</button></div>'; $('#sheet').innerHTML = h; return; }
+      var cb = book(sel), min = lg ? lg.min : (s.min || state.goal.min);
+      h = '<h2 id="sheet-title">' + (lg ? '기록 수정' : '오늘 읽은 것 기록') + '</h2>' +
+        '<div class="field"><label for="lg-book">책</label><select id="lg-book">' + cand.map(function (x) { return '<option value="' + x.id + '"' + (x.id === sel ? ' selected' : '') + '>' + esc(x.title) + '</option>'; }).join('') + '</select></div>' +
+        '<div class="field"><span class="lb">읽은 시간</span><div class="chips" id="lg-chips">' + [10, 20, 30, 45, 60].map(function (n) { return '<button type="button" class="chip num" data-act="min" data-n="' + n + '" aria-pressed="' + (n === min) + '">' + n + '분</button>'; }).join('') + '</div></div>' +
+        '<div class="row2"><div class="field"><label for="lg-min">직접 입력 (분)</label><input type="number" id="lg-min" min="1" max="1440" inputmode="numeric" value="' + min + '"></div>' +
+        '<div class="field"><label for="lg-page">지금 몇 쪽까지? (선택)</label><input type="number" id="lg-page" min="0" inputmode="numeric" value="' + (lg ? (lg.page || '') : '') + '" placeholder="' + (cb && cb.cur ? cb.cur : '') + '"></div></div>' +
+        '<div class="field"><label for="lg-memo">한 줄 메모 (선택)</label><textarea id="lg-memo" maxlength="300" placeholder="인상 깊은 문장이나 오늘 든 생각을 짧게 남겨요">' + esc(lg ? lg.memo : '') + '</textarea></div>' +
+        '<div class="field"><label for="lg-date">날짜</label><input type="date" id="lg-date" value="' + (lg ? lg.date : (s.date || t)) + '" max="' + t + '"></div>' +
+        (lg ? '' : '<label style="display:flex;gap:10px;align-items:center;font-size:14px"><input type="checkbox" id="lg-fin" style="width:20px;height:20px"> 이 책을 다 읽었어요</label>') +
+        '<p class="msg" id="lg-msg" role="alert"></p><div class="sheet-f"><button type="button" class="btn primary" data-act="log-save">저장</button><button type="button" class="btn" data-act="close">취소</button><span class="sp"></span>' + (lg ? '<button type="button" class="btn danger" data-act="log-del" data-id="' + lg.id + '">삭제</button>' : '') + '</div>';
+    } else if (s.type === 'book') {
+      b = s.id ? book(s.id) : { title: '', author: '', pages: 0, status: s.status || 'reading', start: t, end: '', rating: 0, review: '' };
+      var st = s.status || b.status;
+      h = '<h2 id="sheet-title">' + (s.id ? '책 정보 수정' : '책 추가') + '</h2>' +
+        '<div class="field"><label for="bk-title">제목</label><input type="text" id="bk-title" maxlength="120" value="' + esc(b.title) + '" autocomplete="off"></div>' +
+        '<div class="row2"><div class="field"><label for="bk-author">저자 (선택)</label><input type="text" id="bk-author" maxlength="80" value="' + esc(b.author) + '" autocomplete="off"></div>' +
+        '<div class="field"><label for="bk-pages">전체 쪽수 (선택)</label><input type="number" id="bk-pages" min="0" inputmode="numeric" value="' + (b.pages || '') + '"></div></div>' +
+        '<div class="field"><span class="lb">상태</span><div class="chips">' + ['reading', 'want', 'done'].map(function (x) { return '<button type="button" class="chip" data-act="bk-status" data-s="' + x + '" aria-pressed="' + (st === x) + '">' + STATUS[x] + '</button>'; }).join('') + '</div></div>' +
+        '<div class="row2"' + (st === 'want' ? ' hidden' : '') + ' id="bk-dates"><div class="field"><label for="bk-start">시작일</label><input type="date" id="bk-start" value="' + (b.start || t) + '" max="' + t + '"></div>' +
+        '<div class="field"' + (st === 'done' ? '' : ' hidden') + ' id="bk-endf"><label for="bk-end">완독일</label><input type="date" id="bk-end" value="' + (b.end || t) + '" max="' + t + '"></div></div>' +
+        '<p class="msg" id="bk-msg" role="alert"></p><div class="sheet-f"><button type="button" class="btn primary" data-act="book-save">저장</button><button type="button" class="btn" data-act="' + (s.id ? 'open-book' : 'close') + '" data-id="' + (s.id || '') + '">취소</button><span class="sp"></span>' + (s.id ? '<button type="button" class="btn danger" data-act="book-del" data-id="' + s.id + '">책 삭제</button>' : '') + '</div>';
+      s.status = st;
+    } else if (s.type === 'detail') {
+      b = book(s.id); if (!b) { closeSheet(); return; }
+      var lgs = bookLogs(b.id), e = eta(b), mins = bookMinutes(b.id), days = new Set(lgs.map(function (l) { return l.date; })).size;
+      h = '<h2 id="sheet-title" style="overflow-wrap:anywhere">' + esc(b.title) + '</h2><p class="help" style="margin-top:-8px">' + esc(b.author || '저자 미입력') + ' · ' + STATUS[b.status] + '</p>';
+      if (b.pages && b.status !== 'want') h += '<div><div class="bar' + (b.status === 'done' ? ' done' : '') + '"><i style="width:' + Math.min(100, (b.status === 'done' ? b.pages : b.cur) / b.pages * 100) + '%"></i></div><p class="help num" style="margin-top:6px">' + fmt(b.status === 'done' ? b.pages : b.cur) + ' / ' + fmt(b.pages) + '쪽</p></div>';
+      h += '<div class="facts"><div class="fact"><span>읽은 기간</span><b>' + esc(period(b)) + '</b></div><div class="fact"><span>읽은 시간</span><b class="num">' + hm(mins) + '</b></div><div class="fact"><span>읽은 날</span><b class="num">' + days + '일</b></div>' +
+        (e ? '<div class="fact"><span>이 속도면 완독</span><b class="num">' + dotted(e.date) + ' (' + e.left + '일 뒤)</b></div>' : '') + '</div>';
+      if (b.status === 'done') {
+        h += '<div class="field"><span class="lb">별점</span><div class="starp">' + [1, 2, 3, 4, 5].map(function (n) { return '<button type="button" data-act="rate" data-n="' + n + '" class="' + (n <= b.rating ? 'on' : '') + '" aria-label="' + n + '점">★</button>'; }).join('') + '</div></div>' +
+          '<div class="field"><label for="rv">한줄평</label><textarea id="rv" maxlength="300" placeholder="이 책을 한 줄로 남긴다면?">' + esc(b.review) + '</textarea></div>';
+      }
+      h += '<div class="sheet-f">' + (b.status === 'reading' ? '<button type="button" class="btn primary" data-act="log" data-book="' + b.id + '">기록하기</button><button type="button" class="btn done" data-act="finish" data-id="' + b.id + '">완독</button>' :
+        b.status === 'want' ? '<button type="button" class="btn primary" data-act="start-book" data-id="' + b.id + '">읽기 시작</button>' :
+        '<button type="button" class="btn" data-act="reread" data-id="' + b.id + '">다시 읽는 중으로</button>') + '<button type="button" class="btn" data-act="edit-book" data-id="' + b.id + '">정보 수정</button><span class="sp"></span><button type="button" class="btn" data-act="close">닫기</button></div>';
+      h += '<div><div class="sec-t" style="margin-bottom:6px"><h2 style="font-size:15px">읽은 기록</h2><span>' + lgs.length + '번</span></div>' + (lgs.length ? '<div class="logs">' + lgs.map(function (l) {
+        return '<button type="button" class="lg" data-act="edit-log" data-id="' + l.id + '"><span class="d">' + l.date.slice(5).replace('-', '/') + '</span><span class="tx' + (l.memo ? '' : ' none') + '">' + (l.memo ? esc(l.memo) : '메모 없음') + (l.page ? ' <span style="color:var(--ink2);font-family:var(--font);font-size:12px">(' + l.page + '쪽)</span>' : '') + '</span><span class="mn num">' + l.min + '분</span></button>';
+      }).join('') + '</div>' : '<p class="help">아직 기록이 없어요.</p>') + '</div>';
+    } else if (s.type === 'settings') {
+      h = '<h2 id="sheet-title">목표 설정</h2><div class="field"><label for="gl-min">하루 목표 (분)</label><input type="number" id="gl-min" min="1" max="600" inputmode="numeric" value="' + state.goal.min + '"><p class="help">처음엔 작게 시작하는 게 오래 가요. 하루 10~20분이면 충분해요.</p></div>' +
+        '<div class="field"><label for="gl-year">올해 완독 목표 (권)</label><input type="number" id="gl-year" min="1" max="500" inputmode="numeric" value="' + state.goal.year + '"></div>' +
+        '<div class="sheet-f"><button type="button" class="btn primary" data-act="goal-save">저장</button><button type="button" class="btn" data-act="close">취소</button></div>';
+    }
+    $('#sheet').innerHTML = h;
+  }
+
+  /* ---------- 동작 ---------- */
+  var CHEER = ['좋아요, 오늘도 한 걸음 나아갔어요.', '꾸준함이 쌓이고 있어요.', '오늘의 독서 기록 완료!', '잘 읽었어요. 내일도 이어 가요.'];
+  function saveLog() {
+    var s = sheet, bid = $('#lg-book').value, min = Math.floor(+$('#lg-min').value), page = Math.floor(+$('#lg-page').value || 0), memo = $('#lg-memo').value.trim(), date = $('#lg-date').value, msg = $('#lg-msg');
+    var b = book(bid), fin = $('#lg-fin') && $('#lg-fin').checked;
+    if (!b) { msg.textContent = '책을 골라 주세요.'; return; }
+    if (!(min >= 1 && min <= 1440)) { msg.textContent = '읽은 시간을 1분 이상으로 입력해 주세요.'; $('#lg-min').focus(); return; }
+    if (!isDate(date) || date > todayKey()) { msg.textContent = '날짜를 확인해 주세요.'; return; }
+    if (b.pages && page > b.pages) { msg.textContent = '전체 쪽수(' + b.pages + '쪽)보다 클 수 없어요.'; $('#lg-page').focus(); return; }
+    var before = streaks(minutesByDate()).cur, old = s.id ? state.logs.filter(function (l) { return l.id === s.id; })[0] : null, dates = [date];
+    if (old) { dates.push(old.date); old.book = bid; old.date = date; old.min = min; old.page = page; old.memo = memo; }
+    else state.logs.push({ id: uid('l'), book: bid, date: date, min: min, page: page, memo: memo });
+    if (page) b.cur = page;
+    if (b.status === 'want') { b.status = 'reading'; b.start = b.start || date; }
+    if (!b.start || date < b.start) b.start = date;
+    var finished = !old && (fin || (b.pages && page >= b.pages));
+    if (finished) { b.status = 'done'; b.end = date; if (b.pages) b.cur = b.pages; }
+    commit(dates);
+    var after = streaks(minutesByDate()).cur, hit = STREAKS.filter(function (x) { return before < x && after >= x; })[0];
+    if (finished) { openSheet({ type: 'detail', id: b.id }); toast('「' + b.title + '」 완독을 축하해요! 별점과 한줄평을 남겨 보세요.', 5200); }
+    else {
+      closeSheet();
+      var left = state.goal.min - (minutesByDate()[todayKey()] || 0);
+      toast(hit ? hit + '일 연속 읽기를 달성했어요!' : CHEER[Math.floor(Math.random() * CHEER.length)] + (left > 0 && date === todayKey() ? ' 목표까지 ' + left + '분 남았어요.' : ''));
+    }
+  }
+  function saveBook() {
+    var s = sheet, title = $('#bk-title').value.trim(), msg = $('#bk-msg');
+    if (!title) { msg.textContent = '제목을 입력해 주세요.'; $('#bk-title').focus(); return; }
+    var st = s.status || 'reading', start = $('#bk-start').value, end = $('#bk-end').value, pages = Math.max(0, Math.floor(+$('#bk-pages').value || 0)), t = todayKey();
+    if (st !== 'want' && (!isDate(start) || start > t)) { msg.textContent = '시작일을 확인해 주세요.'; return; }
+    if (st === 'done' && (!isDate(end) || end > t || end < start)) { msg.textContent = '완독일은 시작일 이후여야 해요.'; return; }
+    var b = s.id ? book(s.id) : { id: uid('b'), cur: 0, rating: 0, review: '' };
+    b.title = title; b.author = $('#bk-author').value.trim(); b.pages = pages; b.status = st;
+    b.start = st === 'want' ? '' : start; b.end = st === 'done' ? end : '';
+    if (pages && b.cur > pages) b.cur = pages;
+    if (st === 'done' && pages) b.cur = pages;
+    if (!s.id) { state.books.push(b); shelf = st; }
+    commit(); openSheet({ type: 'detail', id: b.id });
+  }
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest('[data-act]');
+    if (!t) { if (e.target.id === 'scrim') closeSheet(); return; }
+    var act = t.dataset.act, id = t.dataset.id, b = id && book(id);
+    if (act === 'shelf') { shelf = t.dataset.s; render(); }
+    else if (act === 'log') openSheet({ type: 'log', book: t.dataset.book || null });
+    else if (act === 'add-book') openSheet({ type: 'book', status: shelf === 'done' ? 'reading' : shelf });
+    else if (act === 'open-book') openSheet({ type: 'detail', id: id });
+    else if (act === 'edit-book') openSheet({ type: 'book', id: id });
+    else if (act === 'close') closeSheet();
+    else if (act === 'min') { $('#lg-min').value = t.dataset.n; document.querySelectorAll('#lg-chips .chip').forEach(function (c) { c.setAttribute('aria-pressed', String(c === t)); }); }
+    else if (act === 'log-save') saveLog();
+    else if (act === 'edit-log') openSheet({ type: 'log', id: id });
+    else if (act === 'log-del') {
+      if (t.dataset.armed !== '1') { t.dataset.armed = '1'; t.textContent = '정말 삭제'; return; }
+      var l = state.logs.filter(function (x) { return x.id === id; })[0], bk = l && l.book;
+      state.logs = state.logs.filter(function (x) { return x.id !== id; }); commit([l && l.date]); if (bk) openSheet({ type: 'detail', id: bk }); else closeSheet();
+    }
+    else if (act === 'bk-status') {
+      sheet.status = t.dataset.s;
+      document.querySelectorAll('[data-act=bk-status]').forEach(function (c) { c.setAttribute('aria-pressed', String(c === t)); });
+      $('#bk-dates').hidden = sheet.status === 'want'; $('#bk-endf').hidden = sheet.status !== 'done';
+    }
+    else if (act === 'book-save') saveBook();
+    else if (act === 'book-del') {
+      if (t.dataset.armed !== '1') { t.dataset.armed = '1'; t.textContent = '정말 삭제 (기록도 함께 지워져요)'; return; }
+      var ds = state.logs.filter(function (x) { return x.book === id; }).map(function (x) { return x.date; });
+      state.books = state.books.filter(function (x) { return x.id !== id; }); state.logs = state.logs.filter(function (x) { return x.book !== id; });
+      commit(ds); closeSheet(); toast('책을 삭제했어요');
+    }
+    else if (act === 'start-book' && b) { b.status = 'reading'; b.start = todayKey(); shelf = 'reading'; commit(); openSheet({ type: 'detail', id: id }); toast('읽기를 시작했어요. 첫 기록을 남겨 볼까요?'); }
+    else if (act === 'finish' && b) { b.status = 'done'; b.end = todayKey(); if (!b.start) b.start = b.end; if (b.pages) b.cur = b.pages; shelf = 'done'; commit(); openSheet({ type: 'detail', id: id }); toast('「' + b.title + '」 완독을 축하해요! 별점과 한줄평을 남겨 보세요.', 5200); }
+    else if (act === 'reread' && b) { b.status = 'reading'; b.end = ''; if (b.pages) b.cur = 0; shelf = 'reading'; commit(); openSheet({ type: 'detail', id: id }); }
+    else if (act === 'rate') { var cb = book(sheet.id); if (cb) { cb.rating = cb.rating === +t.dataset.n ? 0 : +t.dataset.n; state.updatedAt = Date.now(); writeLocal(); schedulePush(); render(); drawSheet(); } }
+    else if (act === 'settings') openSheet({ type: 'settings' });
+    else if (act === 'goal-save') { state.goal.min = Math.max(1, Math.floor(+$('#gl-min').value) || 20); state.goal.year = Math.max(1, Math.floor(+$('#gl-year').value) || 12); commit(); closeSheet(); toast('목표를 저장했어요'); }
+    else if (act === 'more-memo') { memoMore += 50; render(); }
+    else if (act === 'export') exportBackup();
+    else if (act === 'import-yes') { if (pendingImport) { var ts = state.updatedAt, dates = Object.keys(minutesByDate()); state = pendingImport.data; state.updatedAt = Math.max(Date.now(), ts + 1); pendingImport = null; commit(dates.concat(Object.keys(minutesByDate()))); toast('백업에서 복원했어요'); } }
+    else if (act === 'import-no') { pendingImport = null; render(); }
+  });
+  document.addEventListener('input', function (e) {
+    if (e.target.id === 'memoQ') { memoQ = e.target.value; memoMore = 50; var q = memoQ.toLowerCase(); }
+    if (e.target.id === 'memoQ') {
+      var notes = [];
+      state.logs.forEach(function (l) { if (l.memo) { var b = book(l.book); notes.push({ date: l.date, title: b.title, text: l.memo, min: l.min }); } });
+      state.books.forEach(function (b) { if (b.review) notes.push({ date: b.end || b.start || '', title: b.title, text: b.review, rv: 1 }); });
+      notes.sort(function (a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : 0; });
+      $('#memos').innerHTML = memosHtml(notes.filter(function (n) { return !q || (n.title + ' ' + n.text).toLowerCase().indexOf(q) >= 0; }));
+    }
+    else if (e.target.id === 'rv' && sheet && sheet.type === 'detail') {
+      var cb = book(sheet.id); if (cb) { cb.review = e.target.value; clearTimeout(window.__rvT); window.__rvT = setTimeout(function () { state.updatedAt = Date.now(); writeLocal(); schedulePush(); render(); }, 600); }
+    }
+    else if (e.target.id === 'lg-min') { var v = +e.target.value; document.querySelectorAll('#lg-chips .chip').forEach(function (c) { c.setAttribute('aria-pressed', String(+c.dataset.n === v)); }); }
+  });
+  document.addEventListener('change', function (e) {
+    var t = e.target;
+    if (t.id === 'importFile' && t.files && t.files[0]) {
+      var fr = new FileReader();
+      fr.onload = function () {
+        try {
+          var j = JSON.parse(String(fr.result || ''));
+          if (!j || !Array.isArray(j.books)) throw new Error('bad');
+          var data = normalize(j); pendingImport = { data: data, books: data.books.length, logs: data.logs.length }; render();
+        } catch (err) { toast('읽을 수 없는 파일이에요. 내보내기로 저장한 파일을 골라 주세요.'); }
+      };
+      fr.readAsText(t.files[0]);
+    }
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !$('#scrim').hidden) closeSheet(); });
+  async function updateExportBtn() { var b = $('#exportBtn'); if (!b) return; try { var d = CL && CL.use ? await CL.use('downloads') : null; b.hidden = !d; } catch (e) { b.hidden = true; } }
+  async function exportBackup() {
+    try { var d = await CL.use('downloads'); await d.save({ filename: 'reading-check-' + todayKey() + '.json', data: JSON.stringify(state, null, 1) }); toast('백업 파일을 저장했어요'); }
+    catch (e) { if (!e || e.code !== 'declined') toast('이 화면에서는 파일을 저장할 수 없어요'); }
+  }
+
+  render();
+  initRemote();
+  report(todayKey());
+})();
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
-﻿# My Tools
+# My Tools
 
-루틴, 신앙관리(성경 읽기 체크), 역량관리(플래너·OPIc), 재정관리(가계부)를 한곳에서 쓰는 앱이에요.
+루틴, 신앙관리(성경 읽기 체크), 역량관리(플래너·OPIc·독서), 건강관리(러닝), 재정관리(가계부)를 한곳에서 쓰는 앱이에요.
 폰 홈 화면에 설치해서 앱처럼 쓰고, Google 로그인으로 폰과 PC가 같은 데이터를 써요. 오프라인에서도 열려요.
 
 파일 구성
@@ -8,11 +8,11 @@
 | 파일 | 하는 일 |
 | --- | --- |
 | `index.html` | 왼쪽 영역 메뉴, 하단 탭, 로그인 화면. 도구들을 한 화면에 담아요 |
-| `routine.html` `bible.html` `reading.html` `planner.html` `opic.html` `budget.html` | 각 도구 |
+| `routine.html` `bible.html` `reading.html` `running.html` `planner.html` `opic.html` `budget.html` | 각 도구 |
 | `backend.js` | 저장소. 로그인하면 Firebase에, 아니면 이 기기에 저장해요 |
 | `firebase-config.js` | **내가 채울 파일.** Firebase 설정값을 넣어요 |
 | `firestore.rules` | 데이터 보호 규칙. Firebase에 붙여 넣어요 |
-| `manifest.webmanifest` `sw.js` `icons/` | 앱 설치와 오프라인 사용 |
+| `manifest.webmanifest` `sw.js` `icon-*.png` | 앱 설치와 오프라인 사용 |
 
 ## 1. Firebase 프로젝트 만들기 (무료, 한 번만)
 

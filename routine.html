@@ -440,8 +440,8 @@ html.emb .sheet { border-radius: 18px; }
   /* ---------- state ---------- */
   function seed() {
     var t = todayKey();
-    var mk = function (name, link, goal, time, days) { return { id: uid(), name: name, link: link, goal: goal, time: time, days: days || [0, 1, 2, 3, 4, 5, 6], created: t, ended: '', tool: '' }; };
-    var mkT = function (name, tool, goal, time, days) { var r = mk(name, 'tool', goal, time, days); r.tool = tool; return r; };
+    var mk = function (name, link, goal, time, days) { return { id: uid(), name: name, link: link, goal: goal, time: time, days: days || [0, 1, 2, 3, 4, 5, 6], created: t, ended: '', tool: '', mode: '' }; };
+    var mkT = function (name, tool, goal, time, days, mode) { var r = mk(name, 'tool', goal, time, days); r.tool = tool; r.mode = mode || ''; return r; };
     return {
       v: 1, updatedAt: 0, hideIntro: false, remind: true, logs: {}, metrics: {}, notes: {},
       routines: [
@@ -449,6 +449,8 @@ html.emb .sheet { border-radius: 18px; }
         mk('물 8잔 마시기', 'water', 8, ''),
         mkT('성경 3장 읽기', 'bible', 3, '06:30'),
         mkT('독서 20분', 'reading', 20, '21:00'),
+        mkT('러닝 주간 목표', 'running', 0, '', null, 'week'),
+        mkT('러닝 계획한 날', 'running', 0, '06:00', null, 'plan'),
         mkT('OPIc 스피킹 연습', 'opic', 1, '20:00', [1, 2, 3, 4, 5]),
         mk('걷기 8,000보', 'steps', 8000, ''),
         mk('집중 25분', 'focus', 25, '14:00', [1, 2, 3, 4, 5]),
@@ -463,7 +465,7 @@ html.emb .sheet { border-radius: 18px; }
     return {
       v: 1, updatedAt: s.updatedAt || 0,
       routines: Array.isArray(s.routines) ? s.routines.map(function (r) {
-        return { id: String(r.id || uid()), name: String(r.name || '루틴'), link: LINK_NAMES[r.link] ? r.link : 'none', goal: Number(r.goal) || 0, time: r.time || '', days: Array.isArray(r.days) && r.days.length ? r.days.map(Number) : [0, 1, 2, 3, 4, 5, 6], created: r.created || todayKey(), ended: r.ended || '', tool: r.tool || '' };
+        return { id: String(r.id || uid()), name: String(r.name || '루틴'), link: LINK_NAMES[r.link] ? r.link : 'none', goal: Number(r.goal) || 0, time: r.time || '', days: Array.isArray(r.days) && r.days.length ? r.days.map(Number) : [0, 1, 2, 3, 4, 5, 6], created: r.created || todayKey(), ended: r.ended || '', tool: r.tool || '', mode: r.mode === 'week' || r.mode === 'plan' ? r.mode : '' };
       }) : [],
       logs: s.logs || {}, metrics: s.metrics || {}, notes: s.notes || {},
       hideIntro: !!s.hideIntro, remind: s.remind !== false
@@ -488,7 +490,7 @@ html.emb .sheet { border-radius: 18px; }
   /* ---------- 계정 저장소(db): 허브가 중계해 준다 ---------- */
   var CL = window.__hubClaude || window.claude;
   var remote = null, pushTimer = 0, pushing = false, dirty = false;
-  var activity = {}, meas = {}, toolList = [];
+  var activity = {}, meas = {}, planMap = {}, wkMap = {}, toolList = [];
   var SYNC_TXT = { local: '이 기기에 저장', ok: '저장됨', busy: '저장 중…', err: '동기화 실패 · 이 기기에는 저장됨' };
   function setSync(s) { var el = $('#sync'); el.dataset.s = s === 'busy' ? 'ok' : s; el.textContent = SYNC_TXT[s]; }
   function schedulePush() { if (!remote) return; dirty = true; setSync('busy'); clearTimeout(pushTimer); pushTimer = setTimeout(push, 800); }
@@ -519,7 +521,7 @@ html.emb .sheet { border-radius: 18px; }
       // 허브가 센 도구별 오늘의 기록 횟수를 실시간으로 받아서 연결된 루틴을 자동 체크한다
       db.doc('data/users/' + id + '/hub-activity').onSnapshot(function (s) {
         var ad = s.exists ? (s.data() || {}) : {};
-        activity = ad.days || {}; meas = ad.meas || {};
+        activity = ad.days || {}; meas = ad.meas || {}; planMap = ad.plan || {}; wkMap = ad.wk || {};
         renderToday(); renderStats();
       }, function () {});
     } catch (e) { remote = null; setSync('local'); }
@@ -529,11 +531,23 @@ html.emb .sheet { border-radius: 18px; }
   }
 
   /* ---------- domain ---------- */
-  function sched(r, k) { return k >= r.created && (!r.ended || k < r.ended) && r.days.indexOf(dowOf(k)) >= 0; }
+  function sched(r, k) {
+    if (!(k >= r.created && (!r.ended || k < r.ended))) return false;
+    if (r.link === 'tool' && r.mode === 'plan') return !!((planMap[k] || {})[r.tool]); // 도구에서 계획한 날에만 나타난다
+    return r.days.indexOf(dowOf(k)) >= 0;
+  }
+  // 주간 누적 루틴은 한 주의 마지막 날(일요일)에만 달성률·연속 기록에 센다(주 단위)
+  function counts(r, k) { return !(r.link === 'tool' && r.mode === 'week') || dowOf(k) === 0; }
+  function weekStartKey(k) { return addDays(k, -((dowOf(k) + 6) % 7)); }
   function status(r, k) {
     if (r.link === 'none') { var d = !!(state.logs[k] && state.logs[k][r.id]); return { done: d, p: d ? 1 : 0 }; }
     if (r.link === 'note') { var n = !!((state.notes[k] && state.notes[k].text) || '').trim(); return { done: n, p: n ? 1 : 0 }; }
-    if (r.link === 'tool') { var tm = (meas[k] || {})[r.tool], ov = typeof tm === 'number' ? tm : (((activity[k] || {})[r.tool]) || 0), og = r.goal || 1; return { done: ov >= og, p: Math.min(1, ov / og), v: ov, g: og }; }
+    if (r.link === 'tool') {
+      var mv = function (d) { var x = (meas[d] || {})[r.tool]; return typeof x === 'number' ? x : (((activity[d] || {})[r.tool]) || 0); };
+      if (r.mode === 'week') { var w0 = weekStartKey(k), sm = 0, wi; for (wi = 0; wi < 7; wi++) sm += mv(addDays(w0, wi)); sm = Math.round(sm * 100) / 100; var wg = r.goal || ((wkMap[w0] || {})[r.tool]) || 1; return { done: sm >= wg, p: Math.min(1, sm / wg), v: sm, g: wg }; }
+      if (r.mode === 'plan') { var pl = (planMap[k] || {})[r.tool], pk = pl ? pl.km : 0, pv = mv(k); return { done: pk > 0 && pv >= pk * 0.9, p: pk ? Math.min(1, pv / pk) : 0, v: pv, g: pk, kind: pl ? pl.kind : '' }; }
+      var ov = mv(k), og = r.goal || 1; return { done: ov >= og, p: Math.min(1, ov / og), v: ov, g: og };
+    }
     var v = (state.metrics[k] && state.metrics[k][r.link]) || 0, g = r.goal || 1;
     return { done: v >= g, p: Math.min(1, v / g), v: v, g: g };
   }
@@ -555,7 +569,7 @@ html.emb .sheet { border-radius: 18px; }
   }
   function listFor(k) { return state.routines.filter(function (r) { return sched(r, k); }); }
   function dayRate(k) {
-    var l = listFor(k);
+    var l = listFor(k).filter(function (r) { return counts(r, k); });
     if (!l.length) return null;
     return l.filter(function (r) { return status(r, k).done; }).length / l.length;
   }
@@ -629,6 +643,8 @@ html.emb .sheet { border-radius: 18px; }
     var meta = '';
     if (r.time) meta += '<span class="time' + (late ? ' late' : '') + '">' + r.time + (late ? ' 지남' : '') + '</span>';
     if (m) meta += '<span class="mono">' + fmt(s.v) + ' / ' + fmt(s.g) + (r.link === 'tool' ? toolUnit(r.tool) : m.unit) + '</span>';
+    if (r.link === 'tool' && r.mode === 'week') meta += '<span>' + (k === todayKey() ? '이번 주 · 남은 ' + (7 - ((dowOf(k) + 6) % 7)) + '일' : '그 주 합계') + '</span>';
+    if (s.kind) meta += '<span>' + ({ easy: '이지런', long: '롱런', tempo: '템포런', interval: '인터벌', rp: '목표 페이스 런' }[s.kind] || '') + '</span>';
     if (r.link !== 'none') meta += '<span class="hub">' + esc(r.link === 'tool' ? toolName(r.tool) : '빠른 기록 · ' + HUB_TAG[r.link]) + '</span>';
     if (!meta) meta = '<span>하루 중 언제든</span>';
     var act = '';
@@ -777,9 +793,9 @@ html.emb .sheet { border-radius: 18px; }
       '<div class="legend"><span>적음</span>' + [0, 25, 50, 75, 100].map(function (p) { return '<i style="background:color-mix(in srgb,var(--accent) ' + p + '%,var(--surface2))"></i>'; }).join('') + '<span>많음</span><span style="margin-left:8px">점선 칸은 예정된 루틴이 없던 날</span></div></div></div>';
 
     var rows = state.routines.map(function (r) {
-      var sc = days30.filter(function (kk) { return sched(r, kk); }), dn = sc.filter(function (kk) { return status(r, kk).done; }).length;
+      var sc = days30.filter(function (kk) { return sched(r, kk) && counts(r, kk); }), dn = sc.filter(function (kk) { return status(r, kk).done; }).length;
       var rate = sc.length ? dn / sc.length : null;
-      var st = streakOf(function (kk) { return sched(r, kk) ? status(r, kk).done : null; });
+      var st = streakOf(function (kk) { return sched(r, kk) && counts(r, kk) ? status(r, kk).done : null; });
       return '<div class="rt"><span class="nm">' + esc(r.name) + '</span><div class="bar"><i style="width:' + (rate === null ? 0 : pct(rate)) + '%"></i></div><span class="mono">' + (rate === null ? '–' : pct(rate) + '%') + '</span><span class="sub">' + dn + '/' + sc.length + '일 · 연속 ' + st + '일</span></div>';
     }).join('');
     h += '<div><div class="sec-h"><h2>루틴별 30일</h2></div><div class="list">' + (rows || '<div class="empty">아직 루틴이 없어요.</div>') + '</div></div>';
@@ -792,7 +808,7 @@ html.emb .sheet { border-radius: 18px; }
     if (!state.routines.length) h += '<div class="list"><div class="empty"><b>등록된 루틴이 없어요</b>첫 루틴을 추가해 보세요.</div></div>';
     else h += '<div class="list">' + state.routines.map(function (r) {
       var m = METRICS[r.link];
-      var parts = [daysText(r.days), r.time || '시간 미정', r.link === 'none' ? '직접 체크' : r.link === 'tool' ? toolName(r.tool) + ' ' + fmt(r.goal) + toolUnit(r.tool) : '빠른 기록 · ' + HUB_TAG[r.link] + (m ? ' ' + fmt(r.goal) + m.unit : '')];
+      var parts = [daysText(r.days), r.time || '시간 미정', r.link === 'none' ? '직접 체크' : r.link === 'tool' ? toolName(r.tool) + (r.mode === 'plan' ? ' · 계획한 날' : (r.mode === 'week' ? ' · 주 ' : ' · 하루 ') + (r.goal ? fmt(r.goal) + toolUnit(r.tool) : '자동(도구의 주간 목표)')) : '빠른 기록 · ' + HUB_TAG[r.link] + (m ? ' ' + fmt(r.goal) + m.unit : '')];
       var paused = r.ended && r.ended <= todayKey();
       return '<button type="button" class="mrow' + (paused ? ' paused' : '') + '" data-act="edit" data-id="' + r.id + '"><span style="min-width:0"><span class="nm">' + esc(r.name) + '</span><span class="meta" style="display:flex">' + parts.map(esc).join(' · ') + '</span></span>' + (paused ? '<span class="badge">중지됨</span>' : '') + '</button>';
     }).join('') + '</div>';
@@ -814,6 +830,7 @@ html.emb .sheet { border-radius: 18px; }
       '<div class="field"><label for="f-link">체크 방식</label><select id="f-link">' + Object.keys(LINK_NAMES).map(function (k) { return '<option value="' + k + '"' + (k === r.link ? ' selected' : '') + '>' + LINK_NAMES[k] + '</option>'; }).join('') + '</select>' +
       '<p class="help" id="link-help"></p></div>' +
       '<div class="field" id="tool-row"><label for="f-tool">영역 도구 연결</label><select id="f-tool"><option value="">연결하지 않음</option>' + toolOptions(r.tool || '') + '</select><p class="help">고르면 오늘 화면의 루틴에 “열기” 버튼이 생기고, 체크 방식이 “영역 도구에 기록”이면 그 도구에 저장할 때 자동으로 체크돼요.</p></div>' +
+      '<div class="field" id="mode-row" hidden><label for="f-mode">체크 기준</label><select id="f-mode"><option value="">매일 목표 · 그날 기록이 목표 이상</option><option value="week"' + (r.mode === 'week' ? ' selected' : '') + '>주간 누적 · 요일은 자유, 이번 주 합계가 목표 이상 (목표 칸을 비우면 도구의 주간 목표를 따라요)</option><option value="plan"' + (r.mode === 'plan' ? ' selected' : '') + '>계획한 날 · 도구에서 정한 날에만 나타나고 계획한 만큼 하면 완료</option></select></div>' +
       '<div class="row2"><div class="field" id="goal-row"' + (m ? '' : ' hidden') + '><label for="f-goal">하루 목표 <span id="goal-unit">' + (m ? '(' + m.unit + ')' : '') + '</span></label><input type="number" id="f-goal" min="0" step="any" inputmode="decimal" value="' + (r.goal || (m ? m.goal : '')) + '"></div>' +
       '<div class="field"><label for="f-time">알림 시간</label><input type="time" id="f-time" value="' + esc(r.time) + '"></div></div>' +
       '<div class="field"><span class="lb">반복 요일</span><div class="days" role="group" aria-label="반복 요일">' + DOW.map(function (d, i) { return '<label class="chip"><input type="checkbox" class="f-day" value="' + i + '"' + (r.days.indexOf(i) >= 0 ? ' checked' : '') + ' aria-label="' + d + '요일"><span>' + d + '</span></label>'; }).join('') + '</div>' +
@@ -829,25 +846,27 @@ html.emb .sheet { border-radius: 18px; }
   function closeSheet() { $('#scrim').hidden = true; editingId = null; }
   function syncLinkHelp() {
     var link = $('#f-link').value, m = METRICS[link];
-    $('#goal-row').hidden = !m;
+    var md = link === 'tool' ? $('#f-mode').value : '';
+    $('#mode-row').hidden = link !== 'tool';
+    $('#goal-row').hidden = !m || md === 'plan';
     if (m) $('#goal-unit').textContent = '(' + (link === 'tool' ? toolUnit($('#f-tool').value) : m.unit) + ')';
     $('#link-help').textContent = link === 'none' ? '직접 눌러서 완료를 체크해요.' : link === 'tool' ? '아래에서 고른 도구의 오늘 기록으로 자동 체크돼요. 성경 읽기처럼 수치(장 수)를 알려 주는 도구는 그 수치로, 그 밖의 도구는 저장한 횟수로 따져요.' : link === 'note' ? '오늘의 기록에 한 줄이라도 쓰면 자동으로 체크돼요.' : '빠른 기록에 입력한 ' + m.label + ' 값이 목표에 닿으면 자동으로 체크돼요.';
   }
   function saveSheet() {
     var name = $('#f-name').value.trim(), link = $('#f-link').value, err = $('#f-err');
     var days = Array.prototype.map.call(document.querySelectorAll('.f-day:checked'), function (c) { return +c.value; });
-    var goal = METRICS[link] ? Number($('#f-goal').value) : 0;
+    var mode = link === 'tool' ? ($('#f-mode').value || '') : '', goal = METRICS[link] && mode !== 'plan' ? Number($('#f-goal').value) : 0;
     if (!name) { err.textContent = '루틴 이름을 입력해 주세요.'; $('#f-name').focus(); return; }
     if (!days.length) { err.textContent = '반복할 요일을 하나 이상 골라 주세요.'; return; }
-    if (METRICS[link] && !(goal > 0)) { err.textContent = '하루 목표를 0보다 크게 입력해 주세요.'; $('#f-goal').focus(); return; }
+    if (METRICS[link] && mode !== 'plan' && mode !== 'week' && !(goal > 0)) { err.textContent = '하루 목표를 0보다 크게 입력해 주세요.'; $('#f-goal').focus(); return; }
     var tool = $('#f-tool').value || '';
     if (link === 'tool' && !tool) { err.textContent = '자동으로 체크할 영역 도구를 골라 주세요.'; $('#f-tool').focus(); return; }
     var time = $('#f-time').value || '';
     if (editingId) {
       var r = state.routines.filter(function (x) { return x.id === editingId; })[0];
-      r.name = name; r.link = link; r.goal = goal; r.time = time; r.days = days; r.tool = tool;
+      r.name = name; r.link = link; r.goal = goal; r.time = time; r.days = days; r.tool = tool; r.mode = mode;
     } else {
-      state.routines.push({ id: uid(), name: name, link: link, goal: goal, time: time, days: days, created: todayKey(), ended: '', tool: tool });
+      state.routines.push({ id: uid(), name: name, link: link, goal: goal, time: time, days: days, created: todayKey(), ended: '', tool: tool, mode: mode });
     }
     closeSheet(); commit(); toast(editingId === null ? '루틴을 추가했어요' : '저장했어요');
   }
@@ -1020,7 +1039,7 @@ html.emb .sheet { border-radius: 18px; }
     var t = e.target;
     if (t.dataset && t.dataset.metric) { setMetric(viewKey, t.dataset.metric, t.value); commit(); }
     else if (t.id === 'f-link') { var m = METRICS[t.value]; if (m) $('#f-goal').value = m.goal; syncLinkHelp(); }
-    else if (t.id === 'f-tool') syncLinkHelp();
+    else if (t.id === 'f-tool' || t.id === 'f-mode') syncLinkHelp();
     else if (t.id === 'opt-remind') { state.remind = t.checked; commit('today'); }
     else if (t.id === 'imp-file' && t.files && t.files[0]) {
       var fr = new FileReader();

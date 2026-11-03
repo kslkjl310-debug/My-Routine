@@ -96,6 +96,11 @@
     .tab.active{color:var(--tab-active);background:var(--accent-soft);}
     .tab.active .ic{filter:none;opacity:1;}
   }
+  @media (max-width:430px){
+    .tabbar{gap:2px;}
+    .tab{font-size:10px;padding:6px 0 4px;letter-spacing:-.02em;}
+    .tab .ic{font-size:17px;}
+  }
 </style>
 </head>
 <body>
@@ -106,6 +111,7 @@
     <button class="rail-icon active" data-cat="routine" title="루틴" aria-label="루틴">✅</button>
     <button class="rail-icon" data-cat="competency" title="역량관리" aria-label="역량관리">🎯</button>
     <button class="rail-icon" data-cat="finance" title="재정관리" aria-label="재정관리">💰</button>
+    <button class="rail-icon" data-cat="health" title="건강관리" aria-label="건강관리">🏃</button>
     <button class="rail-icon" data-cat="faith" title="신앙관리" aria-label="신앙관리">🙏</button>
   </nav>
 
@@ -123,6 +129,10 @@
     <div class="cat-view" data-cat-view="finance" hidden>
       <div class="panel-cat-title">재정관리</div>
       <button class="tool-item" data-tool="budget"><span class="dot"></span>우리집 가계부</button>
+    </div>
+    <div class="cat-view" data-cat-view="health" hidden>
+      <div class="panel-cat-title">건강관리</div>
+      <button class="tool-item" data-tool="running"><span class="dot"></span>러닝 관리</button>
     </div>
     <div class="cat-view" data-cat-view="faith" hidden>
       <div class="panel-cat-title">신앙관리</div>
@@ -148,6 +158,7 @@
       <button class="tab" data-tool="planner"><span class="ic">🎯</span>플래너</button>
       <button class="tab" data-tool="opic"><span class="ic">🎙️</span>OPIc</button>
       <button class="tab" data-tool="reading"><span class="ic">📚</span>독서</button>
+      <button class="tab" data-tool="running"><span class="ic">🏃</span>러닝</button>
       <button class="tab" data-tool="budget"><span class="ic">🏡</span>가계부</button>
       <button class="tab" data-tool="bible"><span class="ic">📖</span>성경</button>
     </nav>
@@ -166,11 +177,12 @@
     planner: { cat: 'competency',  name: '역량 성장 플래너', src: 'planner.html' },
     opic:    { cat: 'competency',  name: 'OPIc 스피킹 트레이너', src: 'opic.html' },
     reading: { cat: 'competency',  name: '독서 체크', src: 'reading.html', unit: '분' },
+    running: { cat: 'health',      name: '러닝 관리', src: 'running.html', unit: 'km' },
     budget:  { cat: 'finance',     name: '우리집 가계부', src: 'budget.html' },
     bible:   { cat: 'faith',       name: '성경 읽기 체크', src: 'bible.html', unit: '장' }
   };
-  const CAT_LABEL = { routine: '루틴', competency: '역량관리', finance: '재정관리', faith: '신앙관리' };
-  const CAT_DEFAULT = { routine: 'routine', competency: 'planner', finance: 'budget', faith: 'bible' };
+  const CAT_LABEL = { routine: '루틴', competency: '역량관리', finance: '재정관리', health: '건강관리', faith: '신앙관리' };
+  const CAT_DEFAULT = { routine: 'routine', competency: 'planner', finance: 'budget', health: 'running', faith: 'bible' };
   const frames = {};
   const $ = (id) => document.getElementById(id);
   const prefs = { get(){ try { return localStorage.getItem('hub-tool'); } catch(e){ return null; } }, set(v){ try { localStorage.setItem('hub-tool', v); } catch(e){} } };
@@ -226,21 +238,37 @@
     const uid = await user.id(); if (!uid) return null;
     const ref = db.doc('data/users/' + uid + '/hub-activity'), s = await ref.get();
     const d0 = s.exists ? (s.data() || {}) : {};
-    return { ref, days: d0.days || {}, meas: d0.meas || {} };
+    return { ref, days: d0.days || {}, meas: d0.meas || {}, plan: d0.plan || {}, wk: d0.wk || {} };
   }
   function saveAct(a){
     clearTimeout(actTimer);
-    actTimer = setTimeout(() => { a.ref.set(JSON.parse(JSON.stringify({ days: a.days, meas: a.meas }))).catch(() => {}); }, 800);
+    actTimer = setTimeout(() => { a.ref.set(JSON.parse(JSON.stringify({ days: a.days, meas: a.meas, plan: a.plan, wk: a.wk }))).catch(() => {}); }, 800);
   }
-  // 도구가 "그날 이만큼 했다"는 수치(예: 읽은 장 수)를 알려 주면 날짜·도구별로 남긴다
+  // 도구가 "그날 이만큼 했다"는 수치(예: 읽은 장 수)와 "그날 하기로 계획한 양"(예: 러닝 계획 9km)을 알려 주면 날짜·도구별로 남긴다
   async function reportMeasure(key, r){
     if (!r || typeof r.value !== 'number' || !isFinite(r.value) || !/^\d{4}-\d{2}-\d{2}$/.test(r.date || '')) return;
     try {
       if (!actLoad) actLoad = loadActivity();
       const a = await actLoad; if (!a) return;
-      if (((a.meas[r.date] || {})[key]) === r.value) return;
-      a.meas[r.date] = a.meas[r.date] || {}; a.meas[r.date][key] = r.value;
+      let changed = false;
+      if (((a.meas[r.date] || {})[key]) !== r.value) { a.meas[r.date] = a.meas[r.date] || {}; a.meas[r.date][key] = r.value; changed = true; }
+      if (typeof r.planKm === 'number' && isFinite(r.planKm)) {
+        const cur = (a.plan[r.date] || {})[key], km = r.planKm > 0 ? r.planKm : null, kind = String(r.planKind || '').slice(0, 20);
+        const same = km == null ? !cur : !!(cur && cur.km === km && cur.kind === kind);
+        if (!same) {
+          a.plan[r.date] = a.plan[r.date] || {};
+          if (km == null) { delete a.plan[r.date][key]; if (!Object.keys(a.plan[r.date]).length) delete a.plan[r.date]; }
+          else a.plan[r.date][key] = { km, kind };
+          changed = true;
+        }
+      }
+      if (typeof r.weekKm === 'number' && isFinite(r.weekKm) && r.weekKm > 0) { // 그 주(월요일 날짜)의 주간 목표
+        if (((a.wk[r.date] || {})[key]) !== r.weekKm) { a.wk[r.date] = a.wk[r.date] || {}; a.wk[r.date][key] = r.weekKm; changed = true; }
+      }
+      if (!changed) return;
+      const wks = Object.keys(a.wk).sort(); while (wks.length > 60) delete a.wk[wks.shift()];
       const ks = Object.keys(a.meas).sort(); while (ks.length > 120) delete a.meas[ks.shift()];
+      const ps = Object.keys(a.plan).sort(); while (ps.length > 120) delete a.plan[ps.shift()];
       saveAct(a);
     } catch (e) {}
   }

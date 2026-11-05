@@ -212,6 +212,16 @@ h1.date { margin: 2px 0 0; font-size: 26px; line-height: 1.25; font-weight: 700;
 .notice .acts { display: flex; gap: 8px; }
 .notice .btn { background: transparent; border-color: currentColor; color: inherit; min-height: 34px; }
 .notice.info { background: var(--accent-soft); color: var(--ink); }
+.verse { display: flex; flex-direction: column; gap: 10px; background: var(--accent-soft); border-color: transparent; }
+.verse-h { display: flex; align-items: baseline; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; }
+.verse-h b { font-size: 16px; font-weight: 700; }
+.verse-h span { font-size: 13px; color: var(--ink2); }
+.verse-i { display: flex; flex-direction: column; gap: 2px; }
+.verse-r { font-weight: 700; }
+.verse-t { color: var(--ink); line-height: 1.65; overflow-wrap: anywhere; word-break: keep-all; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
+.verse-i.done .verse-r { color: var(--ok); }
+.verse-more { font-size: 13px; color: var(--ink2); }
+.verse .acts { display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* routine list */
 .list { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
@@ -451,6 +461,8 @@ html.emb .sheet { border-radius: 18px; }
         mkT('독서 20분', 'reading', 20, '21:00'),
         mkT('러닝 주간 목표', 'running', 0, '', null, 'week'),
         mkT('러닝 계획한 날', 'running', 0, '06:00', null, 'plan'),
+        mkT('중보기도', 'prayer', 0, '07:00', null, 'plan'),
+        mkT('말씀 암송', 'verse', 0, '06:40', null, 'plan'),
         mkT('OPIc 스피킹 연습', 'opic', 1, '20:00', [1, 2, 3, 4, 5]),
         mk('걷기 8,000보', 'steps', 8000, ''),
         mk('집중 25분', 'focus', 25, '14:00', [1, 2, 3, 4, 5]),
@@ -490,7 +502,7 @@ html.emb .sheet { border-radius: 18px; }
   /* ---------- 계정 저장소(db): 허브가 중계해 준다 ---------- */
   var CL = window.__hubClaude || window.claude;
   var remote = null, pushTimer = 0, pushing = false, dirty = false;
-  var activity = {}, meas = {}, planMap = {}, wkMap = {}, toolList = [];
+  var activity = {}, meas = {}, planMap = {}, wkMap = {}, toolList = [], verses = [];
   var SYNC_TXT = { local: '이 기기에 저장', ok: '저장됨', busy: '저장 중…', err: '동기화 실패 · 이 기기에는 저장됨' };
   function setSync(s) { var el = $('#sync'); el.dataset.s = s === 'busy' ? 'ok' : s; el.textContent = SYNC_TXT[s]; }
   function schedulePush() { if (!remote) return; dirty = true; setSync('busy'); clearTimeout(pushTimer); pushTimer = setTimeout(push, 800); }
@@ -523,6 +535,11 @@ html.emb .sheet { border-radius: 18px; }
         var ad = s.exists ? (s.data() || {}) : {};
         activity = ad.days || {}; meas = ad.meas || {}; planMap = ad.plan || {}; wkMap = ad.wk || {};
         renderToday(); renderStats();
+      }, function () {});
+      db.doc('data/users/' + id + '/verse-memory').onSnapshot(function (s) {
+        var vd = s.exists ? (s.data() || {}) : {};
+        verses = Array.isArray(vd.items) ? vd.items : [];
+        renderToday();
       }, function () {});
     } catch (e) { remote = null; setSync('local'); }
   }
@@ -659,11 +676,25 @@ html.emb .sheet { border-radius: 18px; }
       '<div style="min-width:0"><div class="nm">' + esc(r.name) + '</div><div class="meta">' + meta + '</div>' +
       (m ? '<div class="bar pbar' + (s.done ? ' ok' : '') + '"><i style="width:' + pct(s.p) + '%"></i></div>' : '') + '</div>' + act + '</div>';
   }
+  function verseCard(isToday, k) {
+    if (!isToday) return '';
+    var list = verses.filter(function (v) {
+      if (!v || v.status === 'paused' || !v.ref || !(v.start <= k)) return false;
+      v.__done = (v.log || []).some(function (l) { return l.d === k; });
+      return (v.due || v.start) <= k || v.__done;
+    }).sort(function (a, b) { return (a.__done ? 1 : 0) - (b.__done ? 1 : 0); });
+    if (!list.length) return '';
+    var left = list.filter(function (v) { return !v.__done; }).length, shown = list.slice(0, 3);
+    return '<div class="card verse"><div class="verse-h"><b>📜 오늘의 암송</b><span>' + (left ? '남은 ' + left + '구절' : '오늘 암송을 마쳤어요') + '</span></div>' +
+      shown.map(function (v) { return '<div class="verse-i' + (v.__done ? ' done' : '') + '"><div class="verse-r">' + esc(v.ref) + (v.__done ? ' ✓' : '') + '</div>' + (v.__done || !v.text ? '' : '<div class="verse-t">' + esc(v.text) + '</div>') + '</div>'; }).join('') +
+      (list.length > shown.length ? '<div class="verse-more">외 ' + (list.length - shown.length) + '구절</div>' : '') +
+      '<div class="acts"><button type="button" class="btn' + (left ? ' primary' : '') + '" data-act="open-tool" data-tool="verse">' + (left ? '암송하러 가기' : '다시 보기') + '</button></div></div>';
+  }
   function renderToday() {
     var k = viewKey, isToday = k === todayKey();
     var list = listFor(k), done = list.filter(function (r) { return status(r, k).done; }).length;
     var streak = streakOf(function (kk) { var x = dayRate(kk); return x === null ? null : x === 1; });
-    var h = '';
+    var h = verseCard(isToday, k);
 
     var due = isToday && state.remind ? dueRoutines() : [];
     if (due.length) {

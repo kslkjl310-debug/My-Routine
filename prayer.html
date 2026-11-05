@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>중보기도 관리</title>
+<script>
+/* 허브 안에서 열렸을 때: 허브(부모 화면)에게 메시지로 부탁해서 계정 저장소를 쓰고, 다른 영역의 도구로 이동한다.
+   (My Tools Hub의 다른 도구들과 같은 방식) */
+(function () {
+  if (window.parent === window) return;
+  document.documentElement.classList.add('emb');
+  var P = window.parent, seq = 0, pending = {}, subs = {};
+  function post(m) { m.__hub = 1; P.postMessage(m, '*'); }
+  function call(cap, op, args) {
+    return new Promise(function (res, rej) {
+      var id = ++seq; pending[id] = { res: res, rej: rej };
+      post({ id: id, cap: cap, op: op, args: args || [] });
+    });
+  }
+  function docSnap(d) {
+    var body = d.data;
+    return { id: d.id, exists: !!d.exists, metadata: d.metadata || {},
+      data: function () { return body == null ? undefined : JSON.parse(JSON.stringify(body)); } };
+  }
+  function wrap(s) {
+    if (!s) return s;
+    if (s.kind === 'doc') return docSnap(s);
+    var docs = (s.docs || []).map(docSnap);
+    return { docs: docs, size: docs.length, empty: !docs.length, metadata: s.metadata || {}, docChanges: function () { return []; } };
+  }
+  window.addEventListener('message', function (e) {
+    if (e.source !== P) return;
+    var m = e.data; if (!m || !m.__hubr) return;
+    if (m.sub) { var s = subs[m.sub]; if (!s) return; if (m.err) { if (s.err) s.err(m.err); } else s.next(wrap(m.snap)); return; }
+    var p = pending[m.id]; if (!p) return; delete pending[m.id];
+    if (m.err) p.rej(m.err); else p.res(m.val);
+  });
+  function subscribe(kind, path, lim, next, err) {
+    var id = ++seq; subs[id] = { next: next, err: err };
+    post({ sub: id, kind: kind, path: path, lim: lim || null });
+    return function () { delete subs[id]; post({ unsub: id }); };
+  }
+  function docRef(path) {
+    return {
+      id: path.split('/').pop(), path: path,
+      get: function () { return call('db', 'docGet', [path]).then(wrap); },
+      set: function (d) { return call('db', 'docSet', [path, d]); },
+      update: function (d) { return call('db', 'docUpdate', [path, d]); },
+      'delete': function () { return call('db', 'docDel', [path]); },
+      collection: function (sub) { return colRef(path + '/' + sub); },
+      onSnapshot: function (next, err) { return subscribe('doc', path, null, next, err); }
+    };
+  }
+  function colRef(path, lim) {
+    return {
+      path: path,
+      doc: function (id) { return docRef(path + '/' + (id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 8)))); },
+      limit: function (n) { return colRef(path, n); },
+      get: function () { return call('db', 'colGet', [path, lim || null]).then(wrap); },
+      onSnapshot: function (next, err) { return subscribe('col', path, lim, next, err); }
+    };
+  }
+  var capsP = null;
+  function caps() {
+    if (!capsP) capsP = new Promise(function (res) {
+      var done = false;
+      call('hub', 'caps', []).then(function (c) { done = true; res(c || {}); }, function () { done = true; res({}); });
+      setTimeout(function () { if (!done) res({}); }, 12000);
+    });
+    return capsP;
+  }
+  var api = {
+    use: function (name) {
+      return caps().then(function (c) {
+        if (!c[name]) return null;
+        if (name === 'db') return { doc: docRef, collection: function (p) { return colRef(p); } };
+        if (name === 'user') return {
+          id: function () { return call('user', 'id', []); },
+          isOwner: function () { return false; }, canEdit: function () { return false; }, can: function () { return null; }
+        };
+        if (name === 'downloads') return { save: function (r) { return call('downloads', 'save', [{ filename: r.filename, data: r.data }]); } };
+        return null;
+      });
+    }
+  };
+  window.__hubClaude = api;
+  window.__hubNav = function (key) { post({ nav: key }); };
+  window.__hubTools = function () { return call('hub', 'tools', []); };
+  // 도구가 "오늘 이만큼 했다"는 수치를 알려 주면 허브가 계정에 남기고, 루틴이 그 수치로 자동 체크한다
+  window.__hubReport = function (r) { post({ report: r }); };
+})();
+</script>
+<style>
+  /* Layout: My Tools 안에서 도는 한 화면 도구. 요약 → 탭(오늘의 기도 / 전체 제목 / 응답받은 기도) → 목록. 제목 추가·수정은 아래에서 올라오는 시트. */
+  :root {
+    --bg: #f6f6f8; --card: #ffffff; --line: #e8e9ee; --track: #e6e7ec;
+    --ink: #1a1b1f; --ink2: #6b6e7a; --accent: #7a5bd1; --accent-ink: #ffffff;
+    --accent-soft: #f0ebfc; --done: #2f9e5f; --done-soft: #e7f5ec; --warn: #b4540a; --warn-soft: #fdf1e3; --danger: #c43d3d;
+    --h0: #e8e9ee; --h1: #ddd2f6; --h2: #bba6ee; --h3: #9677e0; --h4: #6d4cc4;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", Pretendard, Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 var(--font); }
+  button, input, textarea, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .num { font-variant-numeric: tabular-nums; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 22px max(18px, env(safe-area-inset-left, 0px)) 60px max(18px, env(safe-area-inset-right, 0px)); display: flex; flex-direction: column; gap: 16px; }
+
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 10px 14px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: -.01em; }
+  .tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .saved { font-size: 12.5px; font-weight: 600; color: var(--done); }
+  .saved.busy { color: var(--ink2); }
+  .saved.local { color: var(--warn); }
+  .btn { min-height: 38px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); font-weight: 600; font-size: 13.5px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
+  .btn:hover { border-color: #c9cbd4; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn.sm { min-height: 32px; padding: 0 11px; font-size: 12.5px; }
+  .btn.danger { color: var(--danger); }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px 20px; box-shadow: 0 1px 2px rgba(20, 22, 30, .04); }
+  .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  .tile { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; min-width: 0; box-shadow: 0 1px 2px rgba(20, 22, 30, .04); }
+  .tile .lb { font-size: 13px; color: var(--ink2); }
+  .tile .v { font-size: 26px; font-weight: 700; line-height: 1.15; letter-spacing: -.01em; }
+  .tile .v small { font-size: 13px; font-weight: 600; color: var(--ink2); margin-left: 4px; letter-spacing: 0; }
+  .bar { height: 6px; border-radius: 99px; background: var(--track); overflow: hidden; margin-top: 4px; }
+  .bar i { display: block; height: 100%; border-radius: 99px; background: var(--accent); transition: width .2s; }
+  .bar.done i { background: var(--done); }
+
+  .ctl { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; }
+  .seg { display: inline-flex; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 4px; gap: 2px; }
+  .seg button { border: 0; background: none; min-height: 34px; padding: 0 14px; border-radius: 9px; font-weight: 600; color: var(--ink2); }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+  .datef { display: flex; align-items: center; gap: 10px; color: var(--ink2); font-size: 13.5px; }
+  .datef input { min-height: 38px; border: 1px solid var(--line); border-radius: 10px; padding: 0 12px; background: var(--card); }
+
+  .sec-t { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin: 4px 2px 2px; }
+  .sec-t h2 { margin: 0; font-size: 15px; }
+  .sec-t span { font-size: 12.5px; color: var(--ink2); }
+  .list { display: flex; flex-direction: column; gap: 10px; }
+
+  .item { background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 1px 2px rgba(20, 22, 30, .04); overflow: hidden; }
+  .item.prayed { background: var(--done-soft); border-color: #cfe9d9; }
+  .item.answered { border-color: #e1d9f6; }
+  .irow { display: grid; grid-template-columns: 46px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 14px; }
+  .chk { width: 46px; height: 46px; border-radius: 14px; border: 2px solid var(--line); background: var(--bg); font-size: 22px; line-height: 1; color: transparent; display: flex; align-items: center; justify-content: center; }
+  .chk:hover { border-color: var(--accent); }
+  .item.prayed .chk { background: var(--done); border-color: var(--done); color: #fff; }
+  .imain { background: none; border: 0; padding: 0; text-align: left; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .iwho { font-weight: 700; font-size: 15.5px; overflow-wrap: anywhere; }
+  .ititle { color: var(--ink2); font-size: 13.5px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .item.open .ititle { -webkit-line-clamp: unset; display: block; }
+  .imeta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; font-size: 12px; color: var(--ink2); white-space: nowrap; }
+  .cat { display: inline-block; border-radius: 99px; padding: 1px 9px; font-size: 11.5px; font-weight: 600; background: var(--accent-soft); color: var(--accent); }
+  .idet { border-top: 1px solid var(--line); padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 12px; background: #fcfcfd; }
+  .item.prayed .idet { background: #f4fbf7; }
+  .facts { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; color: var(--ink2); }
+  .facts b { color: var(--ink); }
+  .notes { display: flex; flex-direction: column; gap: 6px; }
+  .note { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 8px; align-items: start; font-size: 13.5px; }
+  .note .d { color: var(--ink2); font-size: 12.5px; padding-top: 1px; }
+  .note .t { overflow-wrap: anywhere; }
+  .note button { background: none; border: 0; color: var(--ink2); font-size: 13px; padding: 0 4px; }
+  .addnote { display: flex; gap: 8px; }
+  .addnote input { flex: 1; min-width: 0; min-height: 38px; border: 1px solid var(--line); border-radius: 10px; padding: 0 12px; background: var(--card); }
+  .acts { display: flex; flex-wrap: wrap; gap: 8px; }
+  .answerbox { background: var(--accent-soft); border-radius: 12px; padding: 10px 12px; font-size: 13.5px; }
+  .answerbox b { color: var(--accent); }
+  .empty { text-align: center; color: var(--ink2); padding: 28px 12px; border: 1px dashed #d5d7de; border-radius: 14px; background: var(--card); }
+  .empty .big { font-size: 30px; display: block; margin-bottom: 6px; }
+  .rest { margin-top: 4px; }
+  .rest > summary { cursor: pointer; color: var(--ink2); font-weight: 600; font-size: 13.5px; padding: 8px 2px; }
+  .rest .list { margin-top: 6px; }
+  .gh { font-size: 13.5px; font-weight: 600; color: var(--ink2); margin: 10px 2px 0; }
+
+  .heat-box { overflow-x: auto; }
+  .heat { display: grid; grid-template-rows: repeat(7, var(--c)); grid-auto-flow: column; grid-auto-columns: var(--c); gap: 4px; --c: 14px; width: max-content; }
+  .heat i { border-radius: 4px; background: var(--h0); }
+  .heat i.l1 { background: var(--h1); } .heat i.l2 { background: var(--h2); } .heat i.l3 { background: var(--h3); } .heat i.l4 { background: var(--h4); }
+  .heat i.f { visibility: hidden; }
+  .heat i.t { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+  .bar-note { background: var(--warn-soft); color: var(--warn); border-radius: 12px; padding: 12px 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 14px; }
+  .bar-note .acts { margin-left: auto; }
+  .bar-note .btn { background: transparent; border-color: currentColor; color: inherit; min-height: 34px; }
+  .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 22px; background: var(--ink); color: #fff; padding: 10px 16px; border-radius: 99px; font-size: 14px; z-index: 80; }
+
+  /* 시트(추가·수정·응답 기록) */
+  .scrim { position: fixed; inset: 0; background: rgba(20, 22, 30, .45); z-index: 60; display: flex; align-items: flex-end; justify-content: center; }
+  .sheet { background: var(--card); width: 100%; max-width: 560px; max-height: 92vh; overflow-y: auto; border-radius: 20px 20px 0 0; padding: 20px 20px calc(24px + env(safe-area-inset-bottom, 0px)); display: flex; flex-direction: column; gap: 14px; }
+  @media (min-width: 640px) { .scrim { align-items: center; } .sheet { border-radius: 20px; } }
+  .sheet h3 { margin: 0; font-size: 18px; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field > label, .field > .lab { font-size: 13px; font-weight: 600; color: var(--ink2); }
+  .field input[type=text], .field input[type=date], .field textarea { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); min-height: 42px; width: 100%; }
+  .field textarea { min-height: 84px; resize: vertical; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { min-height: 36px; padding: 0 13px; border-radius: 99px; border: 1px solid var(--line); background: var(--bg); font-weight: 600; font-size: 13px; color: var(--ink2); }
+  .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .hint { font-size: 12.5px; color: var(--ink2); }
+  .sheet .foot { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+
+  @media (max-width: 640px) {
+    .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .irow { grid-template-columns: 44px minmax(0, 1fr); }
+    .imeta { grid-column: 2; flex-direction: row; justify-content: flex-start; flex-wrap: wrap; align-items: center; }
+    .chk { width: 44px; height: 44px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap" id="root"></div>
+<div id="sheet"></div>
+<div class="toast" id="toast" role="status" hidden></div>
+<script>
+(function () {
+  'use strict';
+
+  var CATS = ['가족', '친구·지인', '교회·공동체', '선교·나라', '직장·학업', '기타'];
+  var DOWN = ['일', '월', '화', '수', '목', '금', '토'];
+  var KEY = 'prayer-v1', HEAT = 18 * 7, KEEP_DAYS = 420;
+
+  var $ = function (s) { return document.querySelector(s); };
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
+  var pad = function (n) { return String(n).padStart(2, '0'); };
+  var keyOf = function (d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+  var todayKey = function () { return keyOf(new Date()); };
+  var parseKey = function (k) { var p = k.split('-').map(Number); return new Date(p[0], p[1] - 1, p[2], 12); };
+  var addDays = function (k, n) { var d = parseKey(k); d.setDate(d.getDate() + n); return keyOf(d); };
+  var dowOf = function (k) { return parseKey(k).getDay(); };
+  var dayDiff = function (a, b) { return Math.round((parseKey(b) - parseKey(a)) / 864e5); };
+  var isDate = function (s) { return /^\d{4}-\d{2}-\d{2}$/.test(String(s)); };
+  var short = function (k) { return k.slice(5).replace('-', '/'); };
+  var clone = function (o) { return JSON.parse(JSON.stringify(o)); };
+  var uid = function () { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); };
+
+  /* ---------- 상태 ----------
+     items[]: { id, who, title, cat, days[] (비어 있으면 매일), start, status: open | answered | paused,
+                answeredAt, answerMemo, notes[{d,t}], prayed[날짜] } */
+  function normItem(x) {
+    if (!x || typeof x !== 'object') return null;
+    var who = String(x.who || '').trim().slice(0, 40), title = String(x.title || '').trim().slice(0, 400);
+    if (!who && !title) return null;
+    var days = Array.isArray(x.days) ? x.days.map(Number).filter(function (n, i, a) { return n >= 0 && n <= 6 && a.indexOf(n) === i; }).sort() : [];
+    if (days.length === 7) days = [];
+    var prayed = (Array.isArray(x.prayed) ? x.prayed : []).filter(isDate).filter(function (d, i, a) { return a.indexOf(d) === i; }).sort();
+    var status = x.status === 'answered' || x.status === 'paused' ? x.status : 'open';
+    return {
+      id: String(x.id || uid()), who: who, title: title, cat: CATS.indexOf(x.cat) >= 0 ? x.cat : '기타', days: days,
+      start: isDate(x.start) ? x.start : todayKey(), status: status,
+      answeredAt: status === 'answered' && isDate(x.answeredAt) ? x.answeredAt : '', answerMemo: String(x.answerMemo || '').slice(0, 400),
+      notes: (Array.isArray(x.notes) ? x.notes : []).filter(function (n) { return n && isDate(n.d) && String(n.t || '').trim(); }).map(function (n) { return { d: n.d, t: String(n.t).slice(0, 300) }; }).slice(-60),
+      prayed: prayed
+    };
+  }
+  function normalize(j) {
+    var out = { v: 1, updatedAt: (j && j.updatedAt) || 0, items: [] };
+    ((j && Array.isArray(j.items)) ? j.items : []).forEach(function (x) { var it = normItem(x); if (it) out.items.push(it); });
+    return out;
+  }
+  function readLocal() { try { var raw = localStorage.getItem(KEY); if (raw) return normalize(JSON.parse(raw)); } catch (e) {} return normalize(null); }
+  function writeLocal() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+  var state = readLocal();
+  var tab = 'today', recDate = todayKey(), openId = null, sheet = null, pendingImport = null;
+
+  /* ---------- 계산 ---------- */
+  function byId(id) { for (var i = 0; i < state.items.length; i++) if (state.items[i].id === id) return state.items[i]; return null; }
+  function isDue(it, k) { return it.status === 'open' && it.start <= k && (!it.days.length || it.days.indexOf(dowOf(k)) >= 0); }
+  function dueList(k) { return state.items.filter(function (it) { return isDue(it, k); }); }
+  function prayedOn(it, k) { return it.prayed.indexOf(k) >= 0; }
+  function countOn(k) { var n = 0; state.items.forEach(function (it) { if (prayedOn(it, k)) n++; }); return n; }
+  function byDate() { var m = {}; state.items.forEach(function (it) { it.prayed.forEach(function (d) { m[d] = (m[d] || 0) + 1; }); }); return m; }
+  function streak(m) { var k = todayKey(), n = 0; if (!m[k]) k = addDays(k, -1); while (m[k]) { n++; k = addDays(k, -1); } return n; }
+  var level = function (n) { return n <= 0 ? 0 : n <= 2 ? 1 : n <= 5 ? 2 : n <= 9 ? 3 : 4; };
+  function weekStart(k) { return addDays(k, -((dowOf(k) + 6) % 7)); }
+  function daysText(days) { return days.length ? days.map(function (d) { return DOWN[d]; }).join('·') : '매일'; }
+  function lastPrayed(it) { return it.prayed.length ? it.prayed[it.prayed.length - 1] : ''; }
+  function prune() { // 오래된 기도 기록은 지난 14개월까지만 남긴다
+    var from = addDays(todayKey(), -KEEP_DAYS);
+    state.items.forEach(function (it) { if (it.prayed.length && it.prayed[0] < from) it.prayed = it.prayed.filter(function (d) { return d >= from; }); });
+  }
+
+  /* ---------- 저장·동기화 (허브가 계정 저장소를 중계) ---------- */
+  var CL = window.__hubClaude || window.claude;
+  var remote = null, pushTimer = 0, pushing = false, dirty = false;
+  function setSaved(kind) {
+    var el = $('#saved'); if (!el) return;
+    el.className = 'saved' + (kind === 'busy' ? ' busy' : kind === 'local' ? ' local' : '');
+    el.textContent = kind === 'busy' ? '저장 중…' : kind === 'local' ? '이 기기에만 저장됨' : '저장됨';
+  }
+  var savedKind = 'local';
+  function schedulePush() { if (!remote) return; dirty = true; savedKind = 'busy'; setSaved('busy'); clearTimeout(pushTimer); pushTimer = setTimeout(push, 700); }
+  async function push() {
+    if (pushing) { pushTimer = setTimeout(push, 400); return; }
+    if (!dirty || !remote) return;
+    pushing = true; dirty = false;
+    try { await remote.set(clone(state)); if (!dirty) { savedKind = 'ok'; setSaved('ok'); } } catch (e) { savedKind = 'local'; setSaved('local'); }
+    pushing = false;
+    if (dirty) schedulePush();
+  }
+  async function initRemote() {
+    try {
+      if (!CL || !CL.use) return;
+      var db = await CL.use('db'), user = await CL.use('user');
+      if (!db || !user) return;
+      var id = await user.id(); if (!id) return;
+      remote = db.doc('data/users/' + id + '/prayer-intercession');
+      var snap = await remote.get();
+      if (snap.exists) {
+        var r = normalize(clone(snap.data()));
+        if (r.updatedAt > state.updatedAt) { state = r; writeLocal(); savedKind = 'ok'; render(); }
+        else if (r.updatedAt < state.updatedAt) schedulePush();
+        else { savedKind = 'ok'; setSaved('ok'); }
+      } else if (state.updatedAt > 0) schedulePush();
+      else { savedKind = 'ok'; setSaved('ok'); }
+      reportDay(todayKey());
+    } catch (e) { remote = null; }
+  }
+
+  /* 그날 기도한 제목 수(value)와 그날 기도하기로 한 제목 수(planKm)를 허브에 알려 주면, 루틴이 자동으로 체크한다 */
+  function reportDay(date) {
+    try { if (window.__hubReport) window.__hubReport({ date: date, value: countOn(date), planKm: dueList(date).length, planKind: '중보기도' }); } catch (e) {}
+  }
+  function commit(dates) {
+    prune(); state.updatedAt = Date.now(); writeLocal(); schedulePush(); render();
+    var seen = {}; (dates || []).concat([todayKey()]).forEach(function (d) { if (d && !seen[d]) { seen[d] = 1; reportDay(d); } });
+  }
+  var toastT = 0;
+  function toast(m) { var el = $('#toast'); el.textContent = m; el.hidden = false; clearTimeout(toastT); toastT = setTimeout(function () { el.hidden = true; }, 2600); }
+
+  /* ---------- 화면 ---------- */
+  function itemHtml(it, k) {
+    var done = prayedOn(it, k), isOpen = openId === it.id, ans = it.status === 'answered', paused = it.status === 'paused';
+    var meta = '<span class="cat">' + esc(it.cat) + '</span>' + (paused ? '<span>보류 중</span>' : '<span>' + daysText(it.days) + '</span>') + (it.prayed.length ? '<span class="num">기도 ' + it.prayed.length + '번</span>' : '');
+    var h = '<div class="item' + (done && !ans ? ' prayed' : '') + (ans ? ' answered' : '') + (isOpen ? ' open' : '') + '" id="it-' + esc(it.id) + '"><div class="irow">';
+    h += ans ? '<span class="chk" style="color:var(--accent);border-color:var(--h2);background:var(--accent-soft)" aria-hidden="true">✦</span>'
+      : '<button type="button" class="chk" data-act="pray" data-id="' + esc(it.id) + '" aria-pressed="' + done + '" aria-label="' + esc(it.who || it.title) + ' 기도함 체크" title="' + (done ? short(k) + ' 기도함 (눌러서 취소)' : '기도했어요') + '">✓</button>';
+    h += '<button type="button" class="imain" data-act="open" data-id="' + esc(it.id) + '" aria-expanded="' + isOpen + '"><span class="iwho">' + esc(it.who || '(대상 없음)') + '</span><span class="ititle">' + esc(it.title) + '</span></button>';
+    h += '<span class="imeta">' + meta + '</span></div>';
+    if (isOpen) {
+      var first = it.start, ago = dayDiff(first, todayKey());
+      h += '<div class="idet"><div class="facts"><span>시작 <b>' + short(first) + '</b>' + (ago > 0 ? ' · ' + ago + '일째' : '') + '</span><span>기도한 날 <b class="num">' + it.prayed.length + '</b>일</span>' + (lastPrayed(it) ? '<span>마지막 기도 <b>' + short(lastPrayed(it)) + '</b></span>' : '') + '<span>' + daysText(it.days) + '</span></div>';
+      if (ans) h += '<div class="answerbox"><b>응답받았어요</b> · ' + short(it.answeredAt) + (dayDiff(it.start, it.answeredAt) > 0 ? ' (' + dayDiff(it.start, it.answeredAt) + '일 만에)' : '') + (it.answerMemo ? '<br>' + esc(it.answerMemo) : '') + '</div>';
+      if (it.notes.length) {
+        h += '<div class="notes">' + it.notes.slice().reverse().slice(0, 8).map(function (n) {
+          var real = it.notes.indexOf(n);
+          return '<div class="note"><span class="d">' + short(n.d) + '</span><span class="t">' + esc(n.t) + '</span><button type="button" data-act="note-del" data-id="' + esc(it.id) + '" data-i="' + real + '" aria-label="메모 삭제">✕</button></div>';
+        }).join('') + (it.notes.length > 8 ? '<span class="hint">최근 8개만 보여요</span>' : '') + '</div>';
+      }
+      h += '<div class="addnote"><input type="text" id="nt-' + esc(it.id) + '" maxlength="300" placeholder="소식이나 기도 메모를 남겨요"><button type="button" class="btn sm" data-act="note-add" data-id="' + esc(it.id) + '">메모 저장</button></div>';
+      h += '<div class="acts">';
+      if (it.status === 'open') h += '<button type="button" class="btn sm primary" data-act="answer" data-id="' + esc(it.id) + '">✦ 응답받았어요</button><button type="button" class="btn sm" data-act="pause" data-id="' + esc(it.id) + '">잠시 보류</button>';
+      else h += '<button type="button" class="btn sm primary" data-act="reopen" data-id="' + esc(it.id) + '">다시 기도하기</button>';
+      h += '<button type="button" class="btn sm" data-act="edit" data-id="' + esc(it.id) + '">수정</button><button type="button" class="btn sm danger" data-act="del" data-id="' + esc(it.id) + '">삭제</button></div></div>';
+    }
+    return h + '</div>';
+  }
+
+  function render() {
+    var t = todayKey(), m = byDate(), due = dueList(t), duePrayed = due.filter(function (it) { return prayedOn(it, t); }).length;
+    var wk0 = weekStart(t), weekN = 0; for (var i = 0; i < 7; i++) weekN += m[addDays(wk0, i)] || 0;
+    var openN = state.items.filter(function (it) { return it.status === 'open'; }).length, ansN = state.items.filter(function (it) { return it.status === 'answered'; }).length;
+    var h = '<div class="head"><h1>중보기도 관리</h1><div class="tools"><span class="saved' + (savedKind === 'busy' ? ' busy' : savedKind === 'local' ? ' local' : '') + '" id="saved">' + (savedKind === 'busy' ? '저장 중…' : savedKind === 'local' ? '이 기기에만 저장됨' : '저장됨') + '</span>' +
+      '<button type="button" class="btn" data-act="export" id="exportBtn" hidden>내보내기</button><label class="btn">불러오기<input type="file" id="importFile" accept=".json,application/json" hidden></label>' +
+      '<button type="button" class="btn primary" data-act="add">＋ 기도 제목 추가</button></div></div>';
+    if (pendingImport) h += '<div class="bar-note" role="alert"><span>백업 파일에 기도 제목 ' + pendingImport.n + '개가 있어요. 지금 기록을 이 파일로 덮어쓸까요?</span><span class="acts"><button type="button" class="btn" data-act="import-yes">덮어쓰기</button><button type="button" class="btn" data-act="import-no">취소</button></span></div>';
+
+    h += '<div class="tiles">' +
+      '<div class="tile"><span class="lb">오늘의 기도</span><span class="v num">' + duePrayed + '<small>/ ' + due.length + '건</small></span><div class="bar' + (due.length && duePrayed >= due.length ? ' done' : '') + '"><i style="width:' + (due.length ? Math.min(100, duePrayed / due.length * 100) : 0) + '%"></i></div></div>' +
+      '<div class="tile"><span class="lb">연속 기도</span><span class="v num">' + streak(m) + '<small>일</small></span></div>' +
+      '<div class="tile"><span class="lb">이번 주 기도</span><span class="v num">' + weekN + '<small>번</small></span></div>' +
+      '<div class="tile"><span class="lb">응답받은 기도</span><span class="v num">' + ansN + '<small>건</small></span></div></div>';
+
+    h += '<div class="ctl"><div class="seg" role="group" aria-label="보기">' + [['today', '오늘 기도'], ['all', '전체 ' + (openN + state.items.filter(function (x) { return x.status === 'paused'; }).length)], ['done', '응답 ' + ansN]].map(function (x) {
+      return '<button type="button" data-act="tab" data-t="' + x[0] + '" aria-pressed="' + (tab === x[0]) + '">' + x[1] + '</button>'; }).join('') + '</div>' +
+      (tab === 'today' ? '<label class="datef">기록 날짜 <input type="date" id="recDate" value="' + recDate + '" max="' + t + '"></label>' : '') + '</div>';
+
+    if (!state.items.length) {
+      h += '<div class="empty"><span class="big">🙏</span>아직 기도 제목이 없어요.<br>위의 “기도 제목 추가”로 중보할 사람과 제목을 적어 보세요.</div>';
+    } else if (tab === 'today') {
+      var k = recDate, dueK = dueList(k), restK = state.items.filter(function (it) { return it.status === 'open' && !isDue(it, k) && it.start <= k; });
+      var pr = dueK.filter(function (it) { return prayedOn(it, k); }).length;
+      h += '<div class="sec-t"><h2>' + (k === t ? '오늘' : short(k)) + ' 기도할 제목</h2><span class="num">' + pr + ' / ' + dueK.length + '건 기도함</span></div>';
+      if (!dueK.length) h += '<div class="empty"><span class="big">🌿</span>이 날은 기도하기로 한 제목이 없어요.</div>';
+      else {
+        h += '<div class="list">' + dueK.map(function (it) { return itemHtml(it, k); }).join('') + '</div>';
+        if (pr < dueK.length) h += '<div class="acts"><button type="button" class="btn" data-act="pray-all">남은 ' + (dueK.length - pr) + '건 모두 기도했어요</button></div>';
+        else h += '<div class="answerbox" style="background:var(--done-soft)"><b style="color:var(--done)">오늘의 중보기도를 모두 마쳤어요.</b> 수고했어요.</div>';
+      }
+      if (restK.length) h += '<details class="rest"><summary>' + (k === t ? '오늘은' : '이 날은') + ' 쉬는 제목 ' + restK.length + '건 (눌러서 보기)</summary><div class="list">' + restK.map(function (it) { return itemHtml(it, k); }).join('') + '</div></details>';
+    } else if (tab === 'all') {
+      var act = state.items.filter(function (it) { return it.status !== 'answered'; });
+      if (!act.length) h += '<div class="empty"><span class="big">✦</span>기도 중인 제목이 없어요. 응답받은 기도 탭에서 감사 목록을 볼 수 있어요.</div>';
+      CATS.forEach(function (c) {
+        var arr = act.filter(function (it) { return it.cat === c; });
+        if (!arr.length) return;
+        h += '<div class="gh">' + esc(c) + ' · ' + arr.length + '건</div><div class="list">' + arr.map(function (it) { return itemHtml(it, t); }).join('') + '</div>';
+      });
+    } else {
+      var an = state.items.filter(function (it) { return it.status === 'answered'; }).sort(function (a, b) { return a.answeredAt < b.answeredAt ? 1 : -1; });
+      if (!an.length) h += '<div class="empty"><span class="big">✦</span>아직 응답받은 기도가 없어요.<br>응답을 받으면 제목에서 “응답받았어요”를 눌러 감사로 남겨 보세요.</div>';
+      else h += '<div class="sec-t"><h2>감사로 남긴 기도</h2><span>하나님이 응답하신 기록이에요</span></div><div class="list">' + an.map(function (it) { return itemHtml(it, t); }).join('') + '</div>';
+    }
+
+    var start = addDays(addDays(t, -dowOf(t)), -(HEAT - 7)), cells = '';
+    for (var j = 0; j < HEAT; j++) {
+      var d = addDays(start, j), n = m[d] || 0;
+      cells += d > t ? '<i class="f"></i>' : '<i class="l' + level(n) + (d === t ? ' t' : '') + '" title="' + short(d) + ' · ' + n + '건"></i>';
+    }
+    h += '<section class="card"><div class="sec-t" style="margin-top:0"><h2>최근 기도 기록</h2><span>최근 18주 · 하루에 기도한 제목 수</span></div><div class="heat-box"><div class="heat" role="img" aria-label="최근 18주 기도 기록">' + cells + '</div></div></section>';
+
+    $('#root').innerHTML = h;
+    renderSheet();
+    updateExportBtn();
+  }
+
+  /* 제목 추가·수정, 응답 기록 시트 */
+  function renderSheet() {
+    var el = $('#sheet');
+    if (!sheet) { el.innerHTML = ''; return; }
+    var s = sheet, h = '<div class="scrim" data-act="sheet-bg"><div class="sheet" role="dialog" aria-modal="true" aria-label="' + (s.kind === 'answer' ? '응답 기록' : s.id ? '기도 제목 수정' : '기도 제목 추가') + '">';
+    if (s.kind === 'answer') {
+      var it = byId(s.id);
+      h += '<h3>✦ 응답받았어요</h3><div class="hint">' + esc((it.who ? it.who + ' · ' : '') + it.title).slice(0, 120) + '</div>' +
+        '<div class="field"><label for="sh-adate">응답받은 날</label><input type="date" id="sh-adate" value="' + s.date + '" max="' + todayKey() + '"></div>' +
+        '<div class="field"><label for="sh-amemo">어떻게 응답하셨나요? (선택)</label><textarea id="sh-amemo" maxlength="400" placeholder="감사한 내용을 남겨요">' + esc(s.memo || '') + '</textarea></div>' +
+        '<div class="foot"><button type="button" class="btn" data-act="sheet-close">취소</button><button type="button" class="btn primary" data-act="answer-save">감사로 남기기</button></div>';
+    } else {
+      h += '<h3>' + (s.id ? '기도 제목 수정' : '기도 제목 추가') + '</h3>' +
+        '<div class="field"><label for="sh-who">누구를 위한 기도인가요?</label><input type="text" id="sh-who" maxlength="40" value="' + esc(s.who) + '" placeholder="예: 어머니, ○○ 교회, 김○○ 형제"></div>' +
+        '<div class="field"><label for="sh-title">기도 제목</label><textarea id="sh-title" maxlength="400" placeholder="구체적으로 적을수록 응답을 알아보기 쉬워요">' + esc(s.title) + '</textarea></div>' +
+        '<div class="field"><span class="lab">분류</span><div class="chips" role="group" aria-label="분류">' + CATS.map(function (c) { return '<button type="button" class="chip" data-act="sh-cat" data-c="' + esc(c) + '" aria-pressed="' + (s.cat === c) + '">' + esc(c) + '</button>'; }).join('') + '</div></div>' +
+        '<div class="field"><span class="lab">기도하는 요일</span><div class="chips" role="group" aria-label="요일"><button type="button" class="chip" data-act="sh-every" aria-pressed="' + (!s.days.length) + '">매일</button>' +
+        [1, 2, 3, 4, 5, 6, 0].map(function (d) { return '<button type="button" class="chip" data-act="sh-day" data-d="' + d + '" aria-pressed="' + (s.days.indexOf(d) >= 0) + '">' + DOWN[d] + '</button>'; }).join('') + '</div><span class="hint">제목이 많으면 요일을 나눠서 하루에 기도할 양을 줄일 수 있어요.</span></div>' +
+        '<div class="field"><label for="sh-start">기도를 시작한 날</label><input type="date" id="sh-start" value="' + s.start + '" max="' + todayKey() + '"></div>' +
+        '<div class="foot"><button type="button" class="btn" data-act="sheet-close">취소</button><button type="button" class="btn primary" data-act="sheet-save">' + (s.id ? '저장' : '추가') + '</button></div>';
+    }
+    el.innerHTML = h + '</div></div>';
+    var f = el.querySelector('input[type=text], textarea'); if (f && !s.id && s.kind !== 'answer') { try { f.focus(); } catch (e) {} }
+  }
+  function readSheetFields() {
+    if (!sheet || sheet.kind === 'answer') return;
+    var a = $('#sh-who'), b = $('#sh-title'), c = $('#sh-start');
+    if (a) sheet.who = a.value; if (b) sheet.title = b.value; if (c && isDate(c.value)) sheet.start = c.value;
+  }
+
+  async function updateExportBtn() {
+    var b = $('#exportBtn'); if (!b) return;
+    try { var d = CL && CL.use ? await CL.use('downloads') : null; b.hidden = !d; } catch (e) { b.hidden = true; }
+  }
+
+  /* ---------- 이벤트 ---------- */
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest('[data-act]'); if (!t) return;
+    var act = t.dataset.act, id = t.dataset.id, it = id && byId(id);
+    if (act === 'sheet-bg') { if (e.target === t) { sheet = null; renderSheet(); } return; }
+    if (act === 'tab') { tab = t.dataset.t; render(); }
+    else if (act === 'open') { openId = openId === id ? null : id; render(); }
+    else if (act === 'pray' && it) {
+      var k = tab === 'today' ? recDate : todayKey(), i = it.prayed.indexOf(k);
+      if (i >= 0) it.prayed.splice(i, 1); else { it.prayed.push(k); it.prayed.sort(); }
+      commit([k]);
+    }
+    else if (act === 'pray-all') {
+      var kk = recDate, n = 0;
+      dueList(kk).forEach(function (x) { if (!prayedOn(x, kk)) { x.prayed.push(kk); x.prayed.sort(); n++; } });
+      commit([kk]); toast(n + '건을 기도한 것으로 기록했어요');
+    }
+    else if (act === 'add') { sheet = { kind: 'edit', id: '', who: '', title: '', cat: '가족', days: [], start: todayKey() }; renderSheet(); }
+    else if (act === 'edit' && it) { sheet = { kind: 'edit', id: it.id, who: it.who, title: it.title, cat: it.cat, days: it.days.slice(), start: it.start }; renderSheet(); }
+    else if (act === 'sh-cat') { readSheetFields(); sheet.cat = t.dataset.c; renderSheet(); }
+    else if (act === 'sh-every') { readSheetFields(); sheet.days = []; renderSheet(); }
+    else if (act === 'sh-day') {
+      readSheetFields(); var d = +t.dataset.d, p = sheet.days.indexOf(d);
+      if (p >= 0) sheet.days.splice(p, 1); else sheet.days.push(d);
+      sheet.days.sort(); if (sheet.days.length === 7) sheet.days = []; renderSheet();
+    }
+    else if (act === 'sheet-close') { sheet = null; renderSheet(); }
+    else if (act === 'sheet-save') {
+      readSheetFields();
+      var who = sheet.who.trim(), title = sheet.title.trim();
+      if (!who && !title) { toast('대상이나 기도 제목을 적어 주세요'); return; }
+      if (sheet.id) { var cur = byId(sheet.id); if (cur) { cur.who = who; cur.title = title; cur.cat = sheet.cat; cur.days = sheet.days.slice(); cur.start = sheet.start; } }
+      else { var ni = normItem({ id: uid(), who: who, title: title, cat: sheet.cat, days: sheet.days, start: sheet.start, status: 'open' }); state.items.unshift(ni); openId = ni.id; tab = 'today'; }
+      var wasEdit = !!sheet.id; sheet = null; commit([]); toast(wasEdit ? '저장했어요' : '기도 제목을 추가했어요');
+    }
+    else if (act === 'note-add' && it) {
+      var inp = document.getElementById('nt-' + id), txt = inp ? inp.value.trim() : ''; if (!txt) return;
+      it.notes.push({ d: todayKey(), t: txt.slice(0, 300) }); it.notes = it.notes.slice(-60); commit([]);
+    }
+    else if (act === 'note-del' && it) { it.notes.splice(+t.dataset.i, 1); commit([]); }
+    else if (act === 'answer' && it) { sheet = { kind: 'answer', id: it.id, date: todayKey(), memo: '' }; renderSheet(); }
+    else if (act === 'answer-save') {
+      var an = byId(sheet.id), ad = $('#sh-adate'), am = $('#sh-amemo');
+      if (an) { an.status = 'answered'; an.answeredAt = ad && isDate(ad.value) ? ad.value : todayKey(); an.answerMemo = am ? am.value.trim().slice(0, 400) : ''; }
+      sheet = null; tab = 'done'; openId = an ? an.id : null; commit([]); toast('감사로 남겼어요. 하나님께 영광!');
+    }
+    else if (act === 'pause' && it) { it.status = 'paused'; commit([]); toast('보류했어요. 전체 제목에서 다시 기도할 수 있어요'); }
+    else if (act === 'reopen' && it) { it.status = 'open'; it.answeredAt = ''; commit([]); toast('다시 기도 중으로 돌려놓았어요'); }
+    else if (act === 'del' && it) {
+      if (t.dataset.armed !== '1') { t.dataset.armed = '1'; t.textContent = '정말 삭제할까요?'; return; }
+      var dts = it.prayed.slice(); state.items = state.items.filter(function (x) { return x.id !== it.id; }); openId = null; commit(dts);
+    }
+    else if (act === 'export') exportBackup();
+    else if (act === 'import-yes') {
+      if (pendingImport) { var ts = state.updatedAt, old = byDate(); state = pendingImport.data; state.updatedAt = Math.max(Date.now(), ts + 1); pendingImport = null; commit(Object.keys(old)); toast('백업에서 복원했어요'); }
+    }
+    else if (act === 'import-no') { pendingImport = null; render(); }
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && sheet) { sheet = null; renderSheet(); }
+    else if (e.key === 'Enter' && e.target && /^nt-/.test(e.target.id || '')) { var b = e.target.parentNode.querySelector('[data-act=note-add]'); if (b) b.click(); }
+  });
+  document.addEventListener('change', function (e) {
+    var t = e.target;
+    if (t.id === 'recDate') { var v = t.value; recDate = isDate(v) && v <= todayKey() ? v : todayKey(); render(); }
+    else if (t.id === 'importFile' && t.files && t.files[0]) {
+      var fr = new FileReader();
+      fr.onload = function () {
+        try {
+          var j = JSON.parse(String(fr.result || ''));
+          if (!j || !Array.isArray(j.items)) throw new Error('no items');
+          var data = normalize(j); pendingImport = { data: data, n: data.items.length }; render();
+        } catch (err) { toast('읽을 수 없는 파일이에요. 내보내기로 저장한 파일을 골라 주세요.'); }
+      };
+      fr.readAsText(t.files[0]);
+    }
+  });
+  async function exportBackup() {
+    try {
+      var d = await CL.use('downloads');
+      await d.save({ filename: 'prayer-' + todayKey() + '.json', data: JSON.stringify(state, null, 1) });
+      toast('백업 파일을 저장했어요');
+    } catch (e) { if (!e || e.code !== 'declined') toast('이 화면에서는 파일을 저장할 수 없어요'); }
+  }
+
+  render();
+  initRemote();
+  reportDay(todayKey());
+})();
+</script>
+</body>
+</html>

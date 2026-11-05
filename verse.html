@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>말씀 암송</title>
+<script>
+/* 허브 안에서 열렸을 때: 허브(부모 화면)에게 메시지로 부탁해서 계정 저장소를 쓰고, 다른 영역의 도구로 이동한다.
+   (My Tools Hub의 다른 도구들과 같은 방식) */
+(function () {
+  if (window.parent === window) return;
+  document.documentElement.classList.add('emb');
+  var P = window.parent, seq = 0, pending = {}, subs = {};
+  function post(m) { m.__hub = 1; P.postMessage(m, '*'); }
+  function call(cap, op, args) {
+    return new Promise(function (res, rej) {
+      var id = ++seq; pending[id] = { res: res, rej: rej };
+      post({ id: id, cap: cap, op: op, args: args || [] });
+    });
+  }
+  function docSnap(d) {
+    var body = d.data;
+    return { id: d.id, exists: !!d.exists, metadata: d.metadata || {},
+      data: function () { return body == null ? undefined : JSON.parse(JSON.stringify(body)); } };
+  }
+  function wrap(s) {
+    if (!s) return s;
+    if (s.kind === 'doc') return docSnap(s);
+    var docs = (s.docs || []).map(docSnap);
+    return { docs: docs, size: docs.length, empty: !docs.length, metadata: s.metadata || {}, docChanges: function () { return []; } };
+  }
+  window.addEventListener('message', function (e) {
+    if (e.source !== P) return;
+    var m = e.data; if (!m || !m.__hubr) return;
+    if (m.sub) { var s = subs[m.sub]; if (!s) return; if (m.err) { if (s.err) s.err(m.err); } else s.next(wrap(m.snap)); return; }
+    var p = pending[m.id]; if (!p) return; delete pending[m.id];
+    if (m.err) p.rej(m.err); else p.res(m.val);
+  });
+  function subscribe(kind, path, lim, next, err) {
+    var id = ++seq; subs[id] = { next: next, err: err };
+    post({ sub: id, kind: kind, path: path, lim: lim || null });
+    return function () { delete subs[id]; post({ unsub: id }); };
+  }
+  function docRef(path) {
+    return {
+      id: path.split('/').pop(), path: path,
+      get: function () { return call('db', 'docGet', [path]).then(wrap); },
+      set: function (d) { return call('db', 'docSet', [path, d]); },
+      update: function (d) { return call('db', 'docUpdate', [path, d]); },
+      'delete': function () { return call('db', 'docDel', [path]); },
+      collection: function (sub) { return colRef(path + '/' + sub); },
+      onSnapshot: function (next, err) { return subscribe('doc', path, null, next, err); }
+    };
+  }
+  function colRef(path, lim) {
+    return {
+      path: path,
+      doc: function (id) { return docRef(path + '/' + (id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 8)))); },
+      limit: function (n) { return colRef(path, n); },
+      get: function () { return call('db', 'colGet', [path, lim || null]).then(wrap); },
+      onSnapshot: function (next, err) { return subscribe('col', path, lim, next, err); }
+    };
+  }
+  var capsP = null;
+  function caps() {
+    if (!capsP) capsP = new Promise(function (res) {
+      var done = false;
+      call('hub', 'caps', []).then(function (c) { done = true; res(c || {}); }, function () { done = true; res({}); });
+      setTimeout(function () { if (!done) res({}); }, 12000);
+    });
+    return capsP;
+  }
+  var api = {
+    use: function (name) {
+      return caps().then(function (c) {
+        if (!c[name]) return null;
+        if (name === 'db') return { doc: docRef, collection: function (p) { return colRef(p); } };
+        if (name === 'user') return {
+          id: function () { return call('user', 'id', []); },
+          isOwner: function () { return false; }, canEdit: function () { return false; }, can: function () { return null; }
+        };
+        if (name === 'downloads') return { save: function (r) { return call('downloads', 'save', [{ filename: r.filename, data: r.data }]); } };
+        return null;
+      });
+    }
+  };
+  window.__hubClaude = api;
+  window.__hubNav = function (key) { post({ nav: key }); };
+  window.__hubTools = function () { return call('hub', 'tools', []); };
+  // 도구가 "오늘 이만큼 했다"는 수치를 알려 주면 허브가 계정에 남기고, 루틴이 그 수치로 자동 체크한다
+  window.__hubReport = function (r) { post({ report: r }); };
+})();
+</script>
+<style>
+  /* Layout: My Tools 안에서 도는 한 화면 도구. 요약 → 탭(오늘 복습 / 전체 구절) → 목록. 구절 추가·수정·연습은 아래에서 올라오는 시트. */
+  :root {
+    --bg: #f6f6f8; --card: #ffffff; --line: #e8e9ee; --track: #e6e7ec;
+    --ink: #1a1b1f; --ink2: #6b6e7a; --accent: #2f8f83; --accent-ink: #ffffff;
+    --accent-soft: #e5f4f1; --done: #2f9e5f; --done-soft: #e7f5ec; --warn: #b4540a; --warn-soft: #fdf1e3; --danger: #c43d3d;
+    --h0: #e8e9ee; --h1: #cde9e4; --h2: #9bd3ca; --h3: #5fb5a8; --h4: #2f8f83;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", Pretendard, Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 var(--font); }
+  button, input, textarea, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .num { font-variant-numeric: tabular-nums; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 22px max(18px, env(safe-area-inset-left, 0px)) 60px max(18px, env(safe-area-inset-right, 0px)); display: flex; flex-direction: column; gap: 16px; }
+
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 10px 14px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: -.01em; }
+  .tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .saved { font-size: 12.5px; font-weight: 600; color: var(--done); }
+  .saved.busy { color: var(--ink2); }
+  .saved.local { color: var(--warn); }
+  .btn { min-height: 38px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); font-weight: 600; font-size: 13.5px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
+  .btn:hover { border-color: #c9cbd4; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn.sm { min-height: 32px; padding: 0 11px; font-size: 12.5px; }
+  .btn.danger { color: var(--danger); }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px 20px; box-shadow: 0 1px 2px rgba(20, 22, 30, .04); }
+  .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  .tile { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; min-width: 0; box-shadow: 0 1px 2px rgba(20, 22, 30, .04); }
+  .tile .lb { font-size: 13px; color: var(--ink2); }
+  .tile .v { font-size: 26px; font-weight: 700; line-height: 1.15; letter-spacing: -.01em; }
+  .tile .v small { font-size: 13px; font-weight: 600; color: var(--ink2); margin-left: 4px; letter-spacing: 0; }
+  .bar { height: 6px; border-radius: 99px; background: var(--track); overflow: hidden; margin-top: 4px; }
+  .bar i { display: block; height: 100%; border-radius: 99px; background: var(--accent); transition: width .2s; }
+  .bar.done i { background: var(--done); }
+
+  .ctl { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; }
+  .seg { display: inline-flex; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 4px; gap: 2px; }
+  .seg button { border: 0; background: none; min-height: 34px; padding: 0 14px; border-radius: 9px; font-weight: 600; color: var(--ink2); white-space: nowrap; }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+
+  .sec-t { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin: 4px 2px 2px; }
+  .sec-t h2 { margin: 0; font-size: 15px; }
+  .sec-t span { font-size: 12.5px; color: var(--ink2); }
+  .list { display: flex; flex-direction: column; gap: 10px; }
+  .gh { font-size: 13.5px; font-weight: 600; color: var(--ink2); margin: 10px 2px 0; }
+
+  .item { background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 1px 2px rgba(20, 22, 30, .04); overflow: hidden; }
+  .item.reviewed { background: var(--done-soft); border-color: #cfe9d9; }
+  .irow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 14px 16px; }
+  .imain { background: none; border: 0; padding: 0; text-align: left; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .iref { font-weight: 700; font-size: 16px; overflow-wrap: anywhere; }
+  .itext { color: var(--ink2); font-size: 13.5px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .item.open .itext { -webkit-line-clamp: unset; display: block; }
+  .imeta { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; font-size: 12px; color: var(--ink2); margin-top: 2px; }
+  .tag { display: inline-block; border-radius: 99px; padding: 1px 9px; font-size: 11.5px; font-weight: 600; background: var(--accent-soft); color: var(--accent); }
+  .tag.new { background: #fff3d6; color: #8a5a00; }
+  .tag.late { background: #fde8e8; color: var(--danger); }
+  .tag.star { background: #efe9fb; color: #6a4bc4; }
+  .idet { border-top: 1px solid var(--line); padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 12px; background: #fcfcfd; }
+  .item.reviewed .idet { background: #f4fbf7; }
+  .facts { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; color: var(--ink2); }
+  .facts b { color: var(--ink); }
+  .acts { display: flex; flex-wrap: wrap; gap: 8px; }
+  .empty { text-align: center; color: var(--ink2); padding: 28px 12px; border: 1px dashed #d5d7de; border-radius: 14px; background: var(--card); }
+  .empty .big { font-size: 30px; display: block; margin-bottom: 6px; }
+  .okbox { background: var(--done-soft); border-radius: 12px; padding: 10px 12px; font-size: 13.5px; }
+  .okbox b { color: var(--done); }
+
+  .heat-box { overflow-x: auto; }
+  .heat { display: grid; grid-template-rows: repeat(7, var(--c)); grid-auto-flow: column; grid-auto-columns: var(--c); gap: 4px; --c: 14px; width: max-content; }
+  .heat i { border-radius: 4px; background: var(--h0); }
+  .heat i.l1 { background: var(--h1); } .heat i.l2 { background: var(--h2); } .heat i.l3 { background: var(--h3); } .heat i.l4 { background: var(--h4); }
+  .heat i.f { visibility: hidden; }
+  .heat i.t { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+  .bar-note { background: var(--warn-soft); color: var(--warn); border-radius: 12px; padding: 12px 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 14px; }
+  .bar-note .acts { margin-left: auto; }
+  .bar-note .btn { background: transparent; border-color: currentColor; color: inherit; min-height: 34px; }
+  .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 22px; background: var(--ink); color: #fff; padding: 10px 16px; border-radius: 99px; font-size: 14px; z-index: 80; }
+
+  /* 시트(추가·수정·연습) */
+  .scrim { position: fixed; inset: 0; background: rgba(20, 22, 30, .45); z-index: 60; display: flex; align-items: flex-end; justify-content: center; }
+  .sheet { background: var(--card); width: 100%; max-width: 580px; max-height: 94vh; overflow-y: auto; border-radius: 20px 20px 0 0; padding: 20px 20px calc(24px + env(safe-area-inset-bottom, 0px)); display: flex; flex-direction: column; gap: 14px; }
+  @media (min-width: 640px) { .scrim { align-items: center; } .sheet { border-radius: 20px; } }
+  .sheet h3 { margin: 0; font-size: 18px; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field > label, .field > .lab { font-size: 13px; font-weight: 600; color: var(--ink2); }
+  .field input[type=text], .field input[type=date], .field textarea { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--card); min-height: 42px; width: 100%; }
+  .field textarea { min-height: 130px; resize: vertical; line-height: 1.6; }
+  .hint { font-size: 12.5px; color: var(--ink2); }
+  .sheet .foot { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+
+  /* 연습 */
+  .pref { font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+  .pbox { background: var(--accent-soft); border-radius: 14px; padding: 18px 16px; font-size: 18px; line-height: 2; letter-spacing: .01em; overflow-wrap: anywhere; word-break: keep-all; min-height: 120px; }
+  .w { display: inline-block; margin: 0 4px 0 0; border-radius: 6px; }
+  .w.mask { background: #bcdcd6; color: transparent; cursor: pointer; user-select: none; height: 1.05em; vertical-align: -.15em; }
+  .w.fst { color: var(--ink); }
+  .w.fst em { font-style: normal; color: #6b8f89; letter-spacing: .05em; }
+  .grade { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .grade .btn { min-height: 52px; flex-direction: column; gap: 0; line-height: 1.25; }
+  .grade .btn small { font-weight: 500; font-size: 11.5px; color: var(--ink2); }
+  .grade .btn.g { background: var(--done); border-color: var(--done); color: #fff; }
+  .grade .btn.g small { color: #e6f6ec; }
+
+  @media (max-width: 640px) {
+    .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .irow { grid-template-columns: minmax(0, 1fr); }
+    .irow .btn { width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap" id="root"></div>
+<div id="sheet"></div>
+<div class="toast" id="toast" role="status" hidden></div>
+<script>
+(function () {
+  'use strict';
+
+  var KEY = 'verse-v1', HEAT = 18 * 7, KEEP_DAYS = 420;
+  /* 복습 간격(일). 잘 외웠다고 할 때마다 한 칸씩 늘어난다. */
+  var INT = [1, 3, 7, 14, 30, 60, 120];
+  var GRADE = { g: '외웠어요', h: '헷갈려요', f: '기억 안 나요' };
+
+  var $ = function (s) { return document.querySelector(s); };
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
+  var pad = function (n) { return String(n).padStart(2, '0'); };
+  var keyOf = function (d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+  var todayKey = function () { return keyOf(new Date()); };
+  var parseKey = function (k) { var p = k.split('-').map(Number); return new Date(p[0], p[1] - 1, p[2], 12); };
+  var addDays = function (k, n) { var d = parseKey(k); d.setDate(d.getDate() + n); return keyOf(d); };
+  var dayDiff = function (a, b) { return Math.round((parseKey(b) - parseKey(a)) / 864e5); };
+  var dowOf = function (k) { return parseKey(k).getDay(); };
+  var isDate = function (s) { return /^\d{4}-\d{2}-\d{2}$/.test(String(s)); };
+  var short = function (k) { return k.slice(5).replace('-', '/'); };
+  var clone = function (o) { return JSON.parse(JSON.stringify(o)); };
+  var uid = function () { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); };
+
+  /* ---------- 상태 ----------
+     items[]: { id, ref(구절 위치), text(본문), tag, start, due(다음 복습일), stage(연속으로 잘 외운 횟수), log[{d, g}], status: active | paused } */
+  function normItem(x) {
+    if (!x || typeof x !== 'object') return null;
+    var ref = String(x.ref || '').trim().slice(0, 60); if (!ref) return null;
+    var start = isDate(x.start) ? x.start : todayKey();
+    return {
+      id: String(x.id || uid()), ref: ref, text: String(x.text || '').trim().slice(0, 2000), tag: String(x.tag || '').trim().slice(0, 20),
+      start: start, due: isDate(x.due) ? x.due : start, stage: Math.min(INT.length, Math.max(0, Math.floor(+x.stage || 0))),
+      log: (Array.isArray(x.log) ? x.log : []).filter(function (l) { return l && isDate(l.d) && GRADE[l.g]; }).map(function (l) { return { d: l.d, g: l.g }; }).slice(-80),
+      status: x.status === 'paused' ? 'paused' : 'active'
+    };
+  }
+  function normalize(j) {
+    var out = { v: 1, updatedAt: (j && j.updatedAt) || 0, items: [] };
+    ((j && Array.isArray(j.items)) ? j.items : []).forEach(function (x) { var it = normItem(x); if (it) out.items.push(it); });
+    return out;
+  }
+  function readLocal() { try { var raw = localStorage.getItem(KEY); if (raw) return normalize(JSON.parse(raw)); } catch (e) {} return normalize(null); }
+  function writeLocal() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+  var state = readLocal();
+  var tab = 'today', openId = null, sheet = null, pendingImport = null;
+
+  /* ---------- 계산 ---------- */
+  function byId(id) { for (var i = 0; i < state.items.length; i++) if (state.items[i].id === id) return state.items[i]; return null; }
+  function reviewedOn(it, k) { for (var i = it.log.length - 1; i >= 0; i--) { if (it.log[i].d === k) return true; if (it.log[i].d < k) break; } return false; }
+  function isDue(it, k) { return it.status === 'active' && it.start <= k && it.due <= k; }
+  function planOn(k) { return state.items.filter(function (it) { return it.status === 'active' && it.start <= k && (it.due <= k || reviewedOn(it, k)); }); } // 오늘 하기로 한 구절(이미 복습해서 다음 날짜로 넘어간 것 포함)
+  function countOn(k) { var n = 0; state.items.forEach(function (it) { if (reviewedOn(it, k)) n++; }); return n; }
+  function byDate() { var m = {}; state.items.forEach(function (it) { var seen = {}; it.log.forEach(function (l) { if (!seen[l.d]) { seen[l.d] = 1; m[l.d] = (m[l.d] || 0) + 1; } }); }); return m; }
+  function streak(m) { var k = todayKey(), n = 0; if (!m[k]) k = addDays(k, -1); while (m[k]) { n++; k = addDays(k, -1); } return n; }
+  var level = function (n) { return n <= 0 ? 0 : n <= 1 ? 1 : n <= 3 ? 2 : n <= 6 ? 3 : 4; };
+  function learned(it) { return it.stage >= 3; }
+  function stageText(it) {
+    if (!it.log.length) return '새 구절';
+    if (it.stage >= 6) return '완전히 외움';
+    if (it.stage >= 3) return '외운 구절';
+    return '외우는 중';
+  }
+  function prune() {
+    var from = addDays(todayKey(), -KEEP_DAYS);
+    state.items.forEach(function (it) { if (it.log.length && it.log[0].d < from) it.log = it.log.filter(function (l) { return l.d >= from; }); });
+  }
+  // 복습 결과를 반영한다. 아직 복습할 때가 안 된 구절을 미리 연습한 경우에는 기록만 남기고 복습 간격은 그대로 둔다.
+  function applyGrade(it, g, k) {
+    var wasDue = it.due <= k;
+    it.log.push({ d: k, g: g }); it.log = it.log.slice(-80);
+    if (!wasDue) return;
+    if (g === 'g') { it.stage = Math.min(INT.length, it.stage + 1); it.due = addDays(k, INT[it.stage - 1]); }
+    else if (g === 'h') { it.due = addDays(k, it.stage <= 1 ? 1 : 2); }
+    else { it.stage = Math.max(0, it.stage - 2); it.due = addDays(k, 1); }
+  }
+
+  /* ---------- 저장·동기화 (허브가 계정 저장소를 중계) ---------- */
+  var CL = window.__hubClaude || window.claude;
+  var remote = null, pushTimer = 0, pushing = false, dirty = false;
+  function setSaved(kind) {
+    var el = $('#saved'); if (!el) return;
+    el.className = 'saved' + (kind === 'busy' ? ' busy' : kind === 'local' ? ' local' : '');
+    el.textContent = kind === 'busy' ? '저장 중…' : kind === 'local' ? '이 기기에만 저장됨' : '저장됨';
+  }
+  var savedKind = 'local';
+  function schedulePush() { if (!remote) return; dirty = true; savedKind = 'busy'; setSaved('busy'); clearTimeout(pushTimer); pushTimer = setTimeout(push, 700); }
+  async function push() {
+    if (pushing) { pushTimer = setTimeout(push, 400); return; }
+    if (!dirty || !remote) return;
+    pushing = true; dirty = false;
+    try { await remote.set(clone(state)); if (!dirty) { savedKind = 'ok'; setSaved('ok'); } } catch (e) { savedKind = 'local'; setSaved('local'); }
+    pushing = false;
+    if (dirty) schedulePush();
+  }
+  async function initRemote() {
+    try {
+      if (!CL || !CL.use) return;
+      var db = await CL.use('db'), user = await CL.use('user');
+      if (!db || !user) return;
+      var id = await user.id(); if (!id) return;
+      remote = db.doc('data/users/' + id + '/verse-memory');
+      var snap = await remote.get();
+      if (snap.exists) {
+        var r = normalize(clone(snap.data()));
+        if (r.updatedAt > state.updatedAt) { state = r; writeLocal(); savedKind = 'ok'; render(); }
+        else if (r.updatedAt < state.updatedAt) schedulePush();
+        else { savedKind = 'ok'; setSaved('ok'); }
+      } else if (state.updatedAt > 0) schedulePush();
+      else { savedKind = 'ok'; setSaved('ok'); }
+      reportDay(todayKey());
+    } catch (e) { remote = null; }
+  }
+
+  /* 그날 복습·암송한 구절 수(value)와 오늘 하기로 한 구절 수(planKm)를 허브에 알려 주면, 루틴이 자동으로 체크한다 */
+  function reportDay(date) {
+    try {
+      if (!window.__hubReport) return;
+      var r = { date: date, value: countOn(date) };
+      if (date === todayKey()) { r.planKm = planOn(date).length; r.planKind = '말씀 암송'; }
+      window.__hubReport(r);
+    } catch (e) {}
+  }
+  function commit(dates) {
+    prune(); state.updatedAt = Date.now(); writeLocal(); schedulePush(); render();
+    var seen = {}; (dates || []).concat([todayKey()]).forEach(function (d) { if (d && !seen[d]) { seen[d] = 1; reportDay(d); } });
+  }
+  var toastT = 0;
+  function toast(m) { var el = $('#toast'); el.textContent = m; el.hidden = false; clearTimeout(toastT); toastT = setTimeout(function () { el.hidden = true; }, 2800); }
+
+  /* ---------- 화면 ---------- */
+  function itemHtml(it, k) {
+    var done = reviewedOn(it, k), isOpen = openId === it.id, due = isDue(it, k), late = due && dayDiff(it.due, k) > 0, fresh = !it.log.length;
+    var tags = '';
+    if (it.status === 'paused') tags += '<span class="tag">보류 중</span>';
+    else {
+      if (fresh) tags += '<span class="tag new">새 구절</span>'; else tags += '<span class="tag' + (it.stage >= 6 ? ' star' : '') + '">' + stageText(it) + '</span>';
+      if (late) tags += '<span class="tag late">' + dayDiff(it.due, k) + '일 밀렸어요</span>';
+      else if (!due) tags += '<span>다음 복습 ' + short(it.due) + '</span>';
+    }
+    if (it.tag) tags += '<span>#' + esc(it.tag) + '</span>';
+    var h = '<div class="item' + (done ? ' reviewed' : '') + (isOpen ? ' open' : '') + '" id="it-' + esc(it.id) + '"><div class="irow">';
+    h += '<button type="button" class="imain" data-act="open" data-id="' + esc(it.id) + '" aria-expanded="' + isOpen + '"><span class="iref">' + esc(it.ref) + '</span><span class="itext">' + (it.text ? esc(it.text) : '(본문을 아직 적지 않았어요)') + '</span><span class="imeta">' + tags + '</span></button>';
+    h += '<button type="button" class="btn ' + (done ? '' : 'primary') + '" data-act="practice" data-id="' + esc(it.id) + '">' + (done ? '다시 연습' : fresh ? '외우기 시작' : '복습하기') + '</button></div>';
+    if (isOpen) {
+      var ago = dayDiff(it.start, todayKey());
+      h += '<div class="idet"><div class="facts"><span>시작 <b>' + short(it.start) + '</b>' + (ago > 0 ? ' · ' + ago + '일째' : '') + '</span><span>복습 <b class="num">' + it.log.length + '</b>번</span><span>단계 <b class="num">' + it.stage + '</b> / ' + INT.length + '</span>' + (it.status === 'active' ? '<span>다음 복습 <b>' + (it.due <= k ? '오늘' : short(it.due)) + '</b></span>' : '') + '</div>';
+      h += '<div class="acts">';
+      if (it.status === 'active') h += '<button type="button" class="btn sm" data-act="pause" data-id="' + esc(it.id) + '">잠시 보류</button>';
+      else h += '<button type="button" class="btn sm primary" data-act="resume" data-id="' + esc(it.id) + '">다시 복습하기</button>';
+      h += '<button type="button" class="btn sm" data-act="edit" data-id="' + esc(it.id) + '">수정</button><button type="button" class="btn sm danger" data-act="del" data-id="' + esc(it.id) + '">삭제</button></div></div>';
+    }
+    return h + '</div>';
+  }
+
+  function render() {
+    var t = todayKey(), m = byDate(), plan = planOn(t), doneN = plan.filter(function (it) { return reviewedOn(it, t); }).length;
+    var act = state.items.filter(function (it) { return it.status === 'active'; }), learnedN = state.items.filter(learned).length;
+    var h = '<div class="head"><h1>말씀 암송</h1><div class="tools"><span class="saved' + (savedKind === 'busy' ? ' busy' : savedKind === 'local' ? ' local' : '') + '" id="saved">' + (savedKind === 'busy' ? '저장 중…' : savedKind === 'local' ? '이 기기에만 저장됨' : '저장됨') + '</span>' +
+      '<button type="button" class="btn" data-act="export" id="exportBtn" hidden>내보내기</button><label class="btn">불러오기<input type="file" id="importFile" accept=".json,application/json" hidden></label>' +
+      '<button type="button" class="btn primary" data-act="add">＋ 구절 추가</button></div></div>';
+    if (pendingImport) h += '<div class="bar-note" role="alert"><span>백업 파일에 구절 ' + pendingImport.n + '개가 있어요. 지금 기록을 이 파일로 덮어쓸까요?</span><span class="acts"><button type="button" class="btn" data-act="import-yes">덮어쓰기</button><button type="button" class="btn" data-act="import-no">취소</button></span></div>';
+
+    h += '<div class="tiles">' +
+      '<div class="tile"><span class="lb">오늘 복습</span><span class="v num">' + doneN + '<small>/ ' + plan.length + '구절</small></span><div class="bar' + (plan.length && doneN >= plan.length ? ' done' : '') + '"><i style="width:' + (plan.length ? Math.min(100, doneN / plan.length * 100) : 0) + '%"></i></div></div>' +
+      '<div class="tile"><span class="lb">연속 복습</span><span class="v num">' + streak(m) + '<small>일</small></span></div>' +
+      '<div class="tile"><span class="lb">외운 구절</span><span class="v num">' + learnedN + '<small>개</small></span></div>' +
+      '<div class="tile"><span class="lb">암송 중인 구절</span><span class="v num">' + act.length + '<small>개</small></span></div></div>';
+
+    h += '<div class="ctl"><div class="seg" role="group" aria-label="보기">' + [['today', '오늘 복습'], ['all', '전체 ' + state.items.length]].map(function (x) {
+      return '<button type="button" data-act="tab" data-t="' + x[0] + '" aria-pressed="' + (tab === x[0]) + '">' + x[1] + '</button>'; }).join('') + '</div></div>';
+
+    if (!state.items.length) {
+      h += '<div class="empty"><span class="big">📜</span>아직 암송할 구절이 없어요.<br>“구절 추가”로 외우고 싶은 말씀의 위치와 본문을 적어 보세요.<br><span class="hint">본문은 쓰는 번역본에서 직접 붙여 넣어요.</span></div>';
+    } else if (tab === 'today') {
+      var dueNow = plan.filter(function (it) { return !reviewedOn(it, t); }).sort(function (a, b) { return (a.log.length ? 1 : 0) - (b.log.length ? 1 : 0) || (a.due < b.due ? -1 : 1); });
+      var doneList = plan.filter(function (it) { return reviewedOn(it, t); });
+      h += '<div class="sec-t"><h2>오늘 복습할 구절</h2><span class="num">' + doneN + ' / ' + plan.length + '구절 마침</span></div>';
+      if (!plan.length) h += '<div class="empty"><span class="big">🌿</span>오늘 복습할 구절이 없어요.<br><span class="hint">새 구절을 추가하면 바로 오늘 외울 구절로 나와요.</span></div>';
+      else {
+        if (dueNow.length) h += '<div class="list">' + dueNow.map(function (it) { return itemHtml(it, t); }).join('') + '</div>';
+        else h += '<div class="okbox"><b>오늘의 말씀 복습을 모두 마쳤어요.</b> 수고했어요.</div>';
+        if (doneList.length) h += '<div class="gh">오늘 마친 구절 · ' + doneList.length + '개</div><div class="list">' + doneList.map(function (it) { return itemHtml(it, t); }).join('') + '</div>';
+      }
+    } else {
+      var groups = [['외우는 중이에요', function (it) { return it.status === 'active' && it.stage < 3; }], ['외운 구절', function (it) { return it.status === 'active' && it.stage >= 3; }], ['보류 중', function (it) { return it.status === 'paused'; }]];
+      groups.forEach(function (g) {
+        var arr = state.items.filter(g[1]); if (!arr.length) return;
+        h += '<div class="gh">' + g[0] + ' · ' + arr.length + '개</div><div class="list">' + arr.map(function (it) { return itemHtml(it, t); }).join('') + '</div>';
+      });
+    }
+
+    var start = addDays(addDays(t, -dowOf(t)), -(HEAT - 7)), cells = '';
+    for (var j = 0; j < HEAT; j++) {
+      var d = addDays(start, j), n = m[d] || 0;
+      cells += d > t ? '<i class="f"></i>' : '<i class="l' + level(n) + (d === t ? ' t' : '') + '" title="' + short(d) + ' · ' + n + '구절"></i>';
+    }
+    h += '<section class="card"><div class="sec-t" style="margin-top:0"><h2>최근 암송 기록</h2><span>최근 18주 · 하루에 복습한 구절 수</span></div><div class="heat-box"><div class="heat" role="img" aria-label="최근 18주 말씀 암송 기록">' + cells + '</div></div></section>';
+    $('#root').innerHTML = h;
+    renderSheet();
+    updateExportBtn();
+  }
+
+  /* 연습 화면의 본문: 전체 보기 / 첫 글자만 / 가리기 */
+  function practiceText(it, mode, revealed) {
+    var words = it.text.split(/\s+/).filter(Boolean);
+    if (!words.length) return '<span class="hint">본문이 없어요. 수정에서 본문을 적어 주세요.</span>';
+    return words.map(function (w, i) {
+      if (mode === 'full' || revealed[i]) return '<span class="w">' + esc(w) + '</span>';
+      var first = Array.from(w)[0], rest = Array.from(w).length - 1;
+      if (mode === 'first') return '<span class="w fst">' + esc(first) + '<em>' + '·'.repeat(Math.min(rest, 6)) + '</em></span>';
+      return '<span class="w mask" data-act="peek" data-i="' + i + '" style="width:' + Math.max(1.4, Array.from(w).length * 0.95) + 'em" title="눌러서 이 단어 보기">' + esc(w) + '</span>';
+    }).join(' ');
+  }
+  function renderSheet() {
+    var el = $('#sheet');
+    if (!sheet) { el.innerHTML = ''; return; }
+    var s = sheet, h = '<div class="scrim" data-act="sheet-bg"><div class="sheet" role="dialog" aria-modal="true">';
+    if (s.kind === 'practice') {
+      var it = byId(s.id), due = it.due <= todayKey();
+      h += '<div class="pref">' + esc(it.ref) + '</div>' +
+        '<div class="seg" role="group" aria-label="연습 방식" style="align-self:flex-start">' + [['full', '1 읽기'], ['first', '2 첫 글자'], ['hide', '3 가리고 말하기']].map(function (x) {
+          return '<button type="button" data-act="pmode" data-m="' + x[0] + '" aria-pressed="' + (s.mode === x[0]) + '">' + x[1] + '</button>'; }).join('') + '</div>' +
+        '<div class="pbox" id="pbox">' + practiceText(it, s.mode, s.rev) + '</div>' +
+        '<div class="hint">' + (s.mode === 'full' ? '소리 내어 읽으며 외워요. 익숙해지면 2단계로 넘어가요.' : s.mode === 'first' ? '첫 글자만 보고 이어서 말해요.' : '본문을 가린 채 처음부터 말해 보세요. 막히면 가려진 단어를 눌러서 확인해요.') + '</div>' +
+        (s.mode === 'hide' ? '<div class="acts"><button type="button" class="btn sm" data-act="peek-all">본문 전체 보기</button></div>' : '') +
+        '<div class="field"><span class="lab">' + (due ? '말해 보았나요? 어땠는지 골라 주세요.' : '아직 복습할 때가 아니라서 기록만 남아요.') + '</span><div class="grade">' +
+        '<button type="button" class="btn g" data-act="grade" data-g="g">외웠어요<small>' + (due ? '다음 복습 ' + short(addDays(todayKey(), INT[Math.min(INT.length, it.stage + 1) - 1])) : '기록만') + '</small></button>' +
+        '<button type="button" class="btn" data-act="grade" data-g="h">헷갈려요<small>' + (due ? short(addDays(todayKey(), it.stage <= 1 ? 1 : 2)) + '에 다시' : '기록만') + '</small></button>' +
+        '<button type="button" class="btn" data-act="grade" data-g="f">기억 안 나요<small>' + (due ? '내일 다시' : '기록만') + '</small></button></div></div>' +
+        '<div class="foot"><button type="button" class="btn" data-act="sheet-close">닫기</button></div>';
+    } else {
+      h += '<h3>' + (s.id ? '구절 수정' : '구절 추가') + '</h3>' +
+        '<div class="field"><label for="sh-ref">구절 위치</label><input type="text" id="sh-ref" maxlength="60" value="' + esc(s.ref) + '" placeholder="예: 요한복음 3:16"></div>' +
+        '<div class="field"><label for="sh-text">본문</label><textarea id="sh-text" maxlength="2000" placeholder="쓰는 번역본의 본문을 붙여 넣어요">' + esc(s.text) + '</textarea><span class="hint">번역본마다 저작권이 있어서 본문은 직접 붙여 넣어 주세요.</span></div>' +
+        '<div class="field"><label for="sh-tag">묶음 이름 (선택)</label><input type="text" id="sh-tag" maxlength="20" value="' + esc(s.tag) + '" placeholder="예: 믿음, 이번 달 구절"></div>' +
+        '<div class="field"><label for="sh-start">외우기 시작할 날</label><input type="date" id="sh-start" value="' + s.start + '"></div>' +
+        '<div class="foot"><button type="button" class="btn" data-act="sheet-close">취소</button><button type="button" class="btn primary" data-act="sheet-save">' + (s.id ? '저장' : '추가') + '</button></div>';
+    }
+    el.innerHTML = h + '</div></div>';
+    if (s.kind !== 'practice' && !s.id) { var f = el.querySelector('input[type=text]'); if (f) { try { f.focus(); } catch (e) {} } }
+  }
+  function readSheetFields() {
+    if (!sheet || sheet.kind === 'practice') return;
+    var a = $('#sh-ref'), b = $('#sh-text'), c = $('#sh-tag'), d = $('#sh-start');
+    if (a) sheet.ref = a.value; if (b) sheet.text = b.value; if (c) sheet.tag = c.value; if (d && isDate(d.value)) sheet.start = d.value;
+  }
+
+  async function updateExportBtn() {
+    var b = $('#exportBtn'); if (!b) return;
+    try { var d = CL && CL.use ? await CL.use('downloads') : null; b.hidden = !d; } catch (e) { b.hidden = true; }
+  }
+
+  /* ---------- 이벤트 ---------- */
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest('[data-act]'); if (!t) return;
+    var act = t.dataset.act, id = t.dataset.id, it = id && byId(id);
+    if (act === 'sheet-bg') { if (e.target === t) { sheet = null; renderSheet(); } return; }
+    if (act === 'tab') { tab = t.dataset.t; render(); }
+    else if (act === 'open') { openId = openId === id ? null : id; render(); }
+    else if (act === 'add') { sheet = { kind: 'edit', id: '', ref: '', text: '', tag: '', start: todayKey() }; renderSheet(); }
+    else if (act === 'edit' && it) { sheet = { kind: 'edit', id: it.id, ref: it.ref, text: it.text, tag: it.tag, start: it.start }; renderSheet(); }
+    else if (act === 'sheet-close') { sheet = null; renderSheet(); }
+    else if (act === 'sheet-save') {
+      readSheetFields();
+      var ref = sheet.ref.trim(); if (!ref) { toast('구절 위치를 적어 주세요'); return; }
+      if (sheet.id) { var cur = byId(sheet.id); if (cur) { cur.ref = ref.slice(0, 60); cur.text = sheet.text.trim().slice(0, 2000); cur.tag = sheet.tag.trim().slice(0, 20); if (sheet.start !== cur.start) { cur.start = sheet.start; if (!cur.log.length) cur.due = sheet.start; } } }
+      else { var ni = normItem({ id: uid(), ref: ref, text: sheet.text, tag: sheet.tag, start: sheet.start, due: sheet.start }); state.items.unshift(ni); tab = 'today'; }
+      var wasEdit = !!sheet.id; sheet = null; commit([]); toast(wasEdit ? '저장했어요' : '구절을 추가했어요. 오늘부터 외워 봐요');
+    }
+    else if (act === 'practice' && it) { sheet = { kind: 'practice', id: it.id, mode: it.log.length ? 'hide' : 'full', rev: {} }; renderSheet(); }
+    else if (act === 'pmode') { sheet.mode = t.dataset.m; sheet.rev = {}; renderSheet(); }
+    else if (act === 'peek') { sheet.rev[+t.dataset.i] = true; renderSheet(); }
+    else if (act === 'peek-all') { var pit = byId(sheet.id); pit.text.split(/\s+/).filter(Boolean).forEach(function (w, i) { sheet.rev[i] = true; }); renderSheet(); }
+    else if (act === 'grade') {
+      var pi = byId(sheet.id), k = todayKey(), g = t.dataset.g; if (!pi) return;
+      applyGrade(pi, g, k); sheet = null; commit([k]);
+      toast(g === 'g' ? '잘했어요! 다음 복습은 ' + short(pi.due) + '이에요' : g === 'h' ? '괜찮아요. ' + short(pi.due) + '에 다시 해 봐요' : '내일 다시 도전해 봐요');
+    }
+    else if (act === 'pause' && it) { it.status = 'paused'; commit([]); toast('보류했어요. 전체 구절에서 다시 시작할 수 있어요'); }
+    else if (act === 'resume' && it) { it.status = 'active'; if (it.due < todayKey()) it.due = todayKey(); commit([]); toast('다시 복습 목록에 넣었어요'); }
+    else if (act === 'del' && it) {
+      if (t.dataset.armed !== '1') { t.dataset.armed = '1'; t.textContent = '정말 삭제할까요?'; return; }
+      var dts = it.log.map(function (l) { return l.d; }); state.items = state.items.filter(function (x) { return x.id !== it.id; }); openId = null; commit(dts);
+    }
+    else if (act === 'export') exportBackup();
+    else if (act === 'import-yes') {
+      if (pendingImport) { var ts = state.updatedAt, old = byDate(); state = pendingImport.data; state.updatedAt = Math.max(Date.now(), ts + 1); pendingImport = null; commit(Object.keys(old)); toast('백업에서 복원했어요'); }
+    }
+    else if (act === 'import-no') { pendingImport = null; render(); }
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && sheet) { sheet = null; renderSheet(); } });
+  document.addEventListener('change', function (e) {
+    var t = e.target;
+    if (t.id === 'importFile' && t.files && t.files[0]) {
+      var fr = new FileReader();
+      fr.onload = function () {
+        try {
+          var j = JSON.parse(String(fr.result || ''));
+          if (!j || !Array.isArray(j.items)) throw new Error('no items');
+          var data = normalize(j); pendingImport = { data: data, n: data.items.length }; render();
+        } catch (err) { toast('읽을 수 없는 파일이에요. 내보내기로 저장한 파일을 골라 주세요.'); }
+      };
+      fr.readAsText(t.files[0]);
+    }
+  });
+  async function exportBackup() {
+    try {
+      var d = await CL.use('downloads');
+      await d.save({ filename: 'verse-' + todayKey() + '.json', data: JSON.stringify(state, null, 1) });
+      toast('백업 파일을 저장했어요');
+    } catch (e) { if (!e || e.code !== 'declined') toast('이 화면에서는 파일을 저장할 수 없어요'); }
+  }
+
+  render();
+  initRemote();
+  reportDay(todayKey());
+})();
+</script>
+</body>
+</html>

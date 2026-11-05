@@ -159,6 +159,8 @@
     <div class="cat-view" data-cat-view="faith" hidden>
       <div class="panel-cat-title">신앙관리</div>
       <button class="tool-item" data-tool="bible"><span class="dot"></span>성경 읽기 체크</button>
+      <button class="tool-item" data-tool="prayer"><span class="dot"></span>중보기도 관리</button>
+      <button class="tool-item" data-tool="verse"><span class="dot"></span>말씀 암송</button>
     </div>
     <div class="panel-note" id="panelNote"></div>
   </aside>
@@ -183,6 +185,8 @@
       <button class="tab" data-tool="running"><span class="ic">🏃</span>러닝</button>
       <button class="tab" data-tool="budget"><span class="ic">🏡</span>가계부</button>
       <button class="tab" data-tool="bible"><span class="ic">📖</span>성경</button>
+      <button class="tab" data-tool="prayer"><span class="ic">🙏</span>기도</button>
+      <button class="tab" data-tool="verse"><span class="ic">📜</span>암송</button>
     </nav>
   </div>
 </div>
@@ -201,7 +205,9 @@
     reading: { cat: 'competency',  name: '독서 체크', src: 'reading.html', unit: '분' },
     running: { cat: 'health',      name: '러닝 관리', src: 'running.html', unit: 'km' },
     budget:  { cat: 'finance',     name: '우리집 가계부', src: 'budget.html' },
-    bible:   { cat: 'faith',       name: '성경 읽기 체크', src: 'bible.html', unit: '장' }
+    bible:   { cat: 'faith',       name: '성경 읽기 체크', src: 'bible.html', unit: '장' },
+    prayer:  { cat: 'faith',       name: '중보기도 관리', src: 'prayer.html', unit: '건' },
+    verse:   { cat: 'faith',       name: '말씀 암송', src: 'verse.html', unit: '구절' }
   };
   const CAT_LABEL = { routine: '루틴', competency: '역량관리', finance: '재정관리', health: '건강관리', faith: '신앙관리' };
   const CAT_DEFAULT = { routine: 'routine', competency: 'planner', finance: 'budget', health: 'running', faith: 'bible' };

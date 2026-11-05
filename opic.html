@@ -242,6 +242,7 @@
     background: var(--surface-1); color: var(--text-secondary); user-select: none;
   }
   .sbtn:hover { border-color: var(--series-1); color: var(--series-1); }
+  .sbtn.on { border-color: var(--series-1); color: var(--series-1); background: color-mix(in srgb, var(--series-1) 12%, var(--surface-1)); }
   .mword { border-radius: 4px; padding: 1px 2px; transition: background .35s, color .35s; }
   .mword.hidden-w { background: var(--grid); color: transparent; cursor: pointer; user-select: none; }
   .mword.hidden-w:hover { background: var(--baseline); }
@@ -1066,10 +1067,15 @@ function nnWarm() {
   const texts = nnChunks(qu.q).concat(splitSentences(qu.a).flatMap(nnChunks));
   texts.forEach(t => { nnGenerate(t, 0).catch(() => {}); });
 }
+// 다음 문장의 소리를 재생하는 동안 미리 만들어 둔다(AI 음성을 쓸 때만)
+function prefetchSpeech(text) {
+  if (!text || !(NN.on && NN.ready) || NN.err) return;
+  nnChunks(text).forEach(t => { nnGenerate(t, 0).catch(() => {}); });
+}
 function nnCtx() {
   const A = window.AudioContext || window.webkitAudioContext;
   NN.ctx = NN.ctx || new A();
-  if (NN.ctx.state === "suspended") NN.ctx.resume();
+  if (NN.ctx.state === "suspended" && !NN.paused) NN.ctx.resume(); // 일시정지 중에는 저절로 재개하지 않는다
   return NN.ctx;
 }
 function nnPlay(v, token) {
@@ -1109,30 +1115,63 @@ async function nnSpeak(text, onDone) {
   onDone && onDone();
 }
 
+// 지금 재생 상태: live = 읽는 중이거나 일시정지 중, owner = 누가 시작했는지(버튼 표시용), engine = AI 음성(nn) / 기본 음성(sys)
+const SPK = { id: 0, live: false, paused: false, owner: null, engine: "nn" };
+const SYS = { id: 0, text: "", pos: 0, onDone: null }; // 기본 음성: 읽던 글자 위치를 기억해서 이어 읽는다
+function spkState(owner) { return SPK.live && owner && SPK.owner === owner ? (SPK.paused ? "paused" : "playing") : "idle"; }
+function spkUi() { if (typeof refreshSpeechUi === "function") refreshSpeechUi(); }
 function stopSpeech() {
-  NN.token++;
+  NN.token++; SYS.id++; SPK.id++;
+  SPK.live = false; SPK.paused = false; NN.paused = false;
   if (NN.src) { try { NN.src.onended = null; NN.src.stop(); } catch (e) {} NN.src = null; }
   const cb = NN.endCb; NN.endCb = null; if (cb) cb();
   if (window.speechSynthesis) speechSynthesis.cancel();
+  spkUi();
+}
+// 일시정지: AI 음성은 소리를 그 자리에서 멈추고, 기본 음성은 읽던 단어 위치를 기억한다. 이어 듣기는 멈춘 자리부터 시작한다.
+function speechPause() {
+  if (!SPK.live || SPK.paused) return false;
+  SPK.paused = true;
+  if (SPK.engine === "nn") { NN.paused = true; try { NN.ctx && NN.ctx.suspend(); } catch (e) {} }
+  else if (window.speechSynthesis) { SYS.id++; speechSynthesis.cancel(); }
+  spkUi();
+  return true;
+}
+function speechResume() {
+  if (!SPK.live || !SPK.paused) return false;
+  SPK.paused = false;
+  NN.paused = false;
+  if (SPK.engine === "nn") { try { NN.ctx && NN.ctx.resume(); } catch (e) {} }
+  else systemSpeak(SYS.text, SYS.onDone, SYS.pos);
+  spkUi();
+  return true;
 }
 const canSpeak = () => !!window.speechSynthesis || (NN.on && NN.ready);
-function systemSpeak(text, onDone) {
+function systemSpeak(text, onDone, from) {
+  SPK.engine = "sys"; SYS.text = text; SYS.pos = from || 0; SYS.onDone = onDone;
   if (!window.speechSynthesis) { onDone && onDone(); return; }
+  const my = ++SYS.id;
   speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
+  if (SPK.paused) return; // 일시정지 중이면 이어 듣기를 눌렀을 때 읽는다
+  const base = SYS.pos, u = new SpeechSynthesisUtterance(text.slice(base));
   u.lang = "en-US";
   const v = bestVoice();
   if (v) { u.voice = v; u.lang = v.lang; }
   u.rate = state.tts.rate;
-  u.onend = () => onDone && onDone();
-  u.onerror = () => onDone && onDone();
+  u.onboundary = (e) => { if (my === SYS.id && e.charIndex >= 0) SYS.pos = base + e.charIndex; };
+  u.onend = () => { if (my === SYS.id) onDone && onDone(); };
+  u.onerror = () => { if (my === SYS.id) onDone && onDone(); };
   speechSynthesis.speak(u);
 }
-function speakCore(text, onDone) {
+function speakCore(text, onDone, owner) {
   stopSpeech();
-  if (NN.on && NN.ready && !NN.err) { nnSpeak(text, onDone); return; }
+  const my = ++SPK.id;
+  SPK.live = true; SPK.paused = false; SPK.owner = owner || null; SPK.engine = "nn";
+  const done = () => { if (my !== SPK.id) return; SPK.live = false; SPK.paused = false; spkUi(); onDone && onDone(); };
+  spkUi();
+  if (NN.on && NN.ready && !NN.err) { nnSpeak(text, done); return; }
   if (NN.on && !NN.ready) ensureNeural(); // 아직 준비 중이면 이번에는 기본 음성으로 읽는다
-  systemSpeak(text, onDone);
+  systemSpeak(text, done);
 }
 // AI 음성 설정 UI
 function initNnUi() {
@@ -1147,9 +1186,26 @@ function initNnUi() {
   if (NN.on) setTimeout(ensureNeural, 800);
 }
 
-function speak(text, onDone) {
+function speak(text, onDone, owner) {
   stopAnswerPlayer(false); // 다른 재생이 시작되면 모범 답안 재생은 초기화
-  speakCore(text, onDone);
+  speakCore(text, onDone, owner);
+}
+// 문장·질문 듣기 버튼: 듣기 → 일시정지 → 이어 듣기
+function toggleSpeak(owner, text) {
+  const st = spkState(owner);
+  if (st === "playing") speechPause();
+  else if (st === "paused") speechResume();
+  else speak(text, null, owner);
+}
+function refreshSpeechUi() {
+  document.querySelectorAll(".sbtn[data-owner]").forEach(b => {
+    const st = spkState(b.dataset.owner);
+    b.textContent = st === "playing" ? "⏸" : st === "paused" ? "▶" : "🔊";
+    b.title = st === "playing" ? "일시정지" : st === "paused" ? "이어 듣기" : "이 문장 듣기";
+    b.classList.toggle("on", st !== "idle");
+  });
+  const q = document.getElementById("pr-tts");
+  if (q) { const st = spkState("q"); q.textContent = st === "playing" ? "⏸ 질문 일시정지" : st === "paused" ? "▶ 질문 이어 듣기" : "🔊 질문 듣기"; }
 }
 // 음성 설정 UI
 initNnUi();
@@ -1795,7 +1851,8 @@ function buildMask() {
     sp.className = "sbtn";
     sp.textContent = "🔊";
     sp.title = "이 문장 듣기";
-    sp.addEventListener("click", () => speak(sent));
+    sp.dataset.owner = "s:" + qu.id + ":" + si;
+    sp.addEventListener("click", () => toggleSpeak(sp.dataset.owner, sent));
     line.appendChild(sp);
     sent.split(/(\s+)/).forEach(piece => {
       if (/^\s*$/.test(piece)) { line.appendChild(document.createTextNode(piece)); return; }
@@ -1981,7 +2038,7 @@ function renderPractice() {
 $("pr-select").addEventListener("change", (e) => { state.currentIdx = +e.target.value; renderPractice(); });
 $("pr-prev").addEventListener("click", () => { if (state.currentIdx > 0) { state.currentIdx--; renderPractice(); } });
 $("pr-next").addEventListener("click", () => { if (state.currentIdx < state.questions.length - 1) { state.currentIdx++; renderPractice(); } });
-$("pr-tts").addEventListener("click", () => { const qu = currentQ(); if (qu) speak(qu.q); });
+$("pr-tts").addEventListener("click", () => { const qu = currentQ(); if (qu) toggleSpeak("q", qu.q); });
 // 모범 답안 전체 듣기 — 문장 단위 재생이라 일시정지 후 멈췄던 문장부터 이어 들을 수 있다
 let ansPlayer = null; // {sentences, idx, paused}
 function updateAnsBtn() {
@@ -2015,13 +2072,13 @@ $("pr-tts-answer").addEventListener("click", () => {
     updateAnsBtn();
     playAnswerSentence();
   } else if (!ansPlayer.paused) {
-    ansPlayer.paused = true;                                  // 일시정지
-    stopSpeech();                                             // (이어 듣기 시 이 문장 처음부터)
+    ansPlayer.paused = true;                                  // 일시정지: 읽던 자리에서 멈춘다
+    speechPause();
     updateAnsBtn();
   } else {
-    ansPlayer.paused = false;                                 // 멈췄던 문장부터 이어서
+    ansPlayer.paused = false;                                 // 멈춘 자리부터 이어서
     updateAnsBtn();
-    playAnswerSentence();
+    if (!speechResume()) playAnswerSentence();                // 멈춘 소리가 없으면 이 문장부터 다시
   }
 });
 $("pr-tts-stop").addEventListener("click", () => stopAnswerPlayer());

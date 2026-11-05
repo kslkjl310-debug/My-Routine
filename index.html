@@ -103,11 +103,11 @@
   }
 
   /* ---- 시작 화면: 천로역정 그림이 크게 뜨고 3초 뒤 서서히 사라진다 ---- */
-  .splash{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:#17163a;opacity:1;transition:opacity 1.2s ease;cursor:pointer;}
+  .splash{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:#17163a;opacity:1;transition:opacity .6s ease;cursor:pointer;}
   .splash.out{opacity:0;pointer-events:none;}
-  /* 0.6초 동안 어둠 속에서 나타나며 살짝 커지고, 보이는 동안 천천히 4%까지 커진다 */
-  .splash img{width:58vmin;height:58vmin;object-fit:contain;border-radius:18px;box-shadow:0 20px 70px rgba(0,0,0,.45);opacity:0;transform:scale(.97);animation:splashIn 5s ease-out forwards;}
-  @keyframes splashIn{0%{opacity:0;transform:scale(.97);}12%{opacity:1;transform:scale(.99);}100%{opacity:1;transform:scale(1.04);}}
+  /* 0.3초 동안 어둠 속에서 나타나며 살짝 커지고, 보이는 동안 천천히 4%까지 커진다 */
+  .splash img{width:58vmin;height:58vmin;object-fit:contain;border-radius:18px;box-shadow:0 20px 70px rgba(0,0,0,.45);opacity:0;transform:scale(.97);animation:splashIn 3.2s ease-out forwards;}
+  @keyframes splashIn{0%{opacity:0;transform:scale(.97);}9%{opacity:1;transform:scale(.99);}100%{opacity:1;transform:scale(1.04);}}
   @media (prefers-reduced-motion:reduce){.splash{transition:opacity .2s ease;}.splash img{animation:none;opacity:1;transform:none;}}
 </style>
 </head>
@@ -119,10 +119,10 @@
 <script>
 (function () {
   var el = document.getElementById('splash'), img = document.getElementById('splash-img'), started = false;
-  function hide() { if (!el || el.classList.contains('out')) return; el.classList.add('out'); setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 1400); }
-  function start() { if (started) return; started = true; setTimeout(hide, 3000); } // 그림이 보이기 시작한 때부터 3초
+  function hide() { if (!el || el.classList.contains('out')) return; el.classList.add('out'); setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 800); }
+  function start() { if (started) return; started = true; setTimeout(hide, 2000); } // 그림이 보이기 시작한 때부터 2초
   if (img.complete) start(); else { img.addEventListener('load', start); img.addEventListener('error', hide); }
-  setTimeout(start, 2500); // 그림 로딩이 늦어도 시작 화면에 오래 갇히지 않게
+  setTimeout(start, 1700); // 그림 로딩이 늦어도 시작 화면에 오래 갇히지 않게
   el.addEventListener('click', hide);
 })();
 </script>

@@ -302,6 +302,36 @@
   .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 20; }
   .modal { background: var(--surface-1); border-radius: var(--card-r); padding: 20px; max-width: 560px; width: 100%; max-height: 85vh; overflow: auto; }
   @media (max-width: 560px) { .qtext { font-size: 15.5px; } .score-big { font-size: 34px; } }
+/* 문장 퀴즈 */
+.qz-top { display: flex; align-items: baseline; justify-content: space-between; gap: 6px 12px; flex-wrap: wrap; }
+.qz-top h2 { margin: 0; }
+.qz-sub { color: var(--text-secondary); font-size: 13px; }
+.qz-topics { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.qz-topic { display: block; width: 100%; text-align: left; background: var(--page); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-family: inherit; color: inherit; cursor: pointer; }
+.qz-topic:hover { border-color: var(--baseline); }
+.qz-topic[aria-pressed="true"] { border-color: var(--series-1); background: color-mix(in srgb, var(--series-1) 9%, var(--page)); }
+.qz-trow { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.qz-tname { font-weight: 600; font-size: 14.5px; }
+.qz-tcnt { font-size: 13px; color: var(--text-secondary); }
+.qz-tcnt b { color: var(--text-primary); }
+.qz-ko { font-size: 20px; font-weight: 600; line-height: 1.55; margin: 8px 0 12px; word-break: keep-all; }
+.qz-bar { height: 6px; background: var(--grid); border-radius: 999px; overflow: hidden; margin-bottom: 12px; cursor: pointer; }
+.qz-bar i { display: block; height: 100%; width: 0; background: var(--series-1); }
+.qz-hint { background: var(--page); border-left: 3px solid var(--series-1); border-radius: 0 8px 8px 0; padding: 8px 12px; margin-bottom: 10px; font-size: 14px; }
+.qz-hint .lab { font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+.qz-hint .mono { font-family: ui-monospace, Consolas, monospace; letter-spacing: .04em; word-break: break-word; }
+.qz-chip { display: inline-block; padding: 3px 9px; margin: 2px 4px 2px 0; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-1); font-size: 14px; }
+.qz-words { line-height: 2.1; margin: 4px 0 6px; }
+.qz-w { display: inline-block; padding: 2px 9px; margin: 2px 4px 2px 0; border-radius: 8px; font-size: 15.5px; border: 1px solid var(--border); }
+.qz-w.hit { background: color-mix(in srgb, var(--good) 18%, transparent); }
+.qz-w.miss { background: color-mix(in srgb, var(--critical) 14%, transparent); border-color: var(--critical); font-weight: 600; }
+.qz-rate { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 6px; }
+.qz-rate .btn { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 9px 6px; }
+.qz-rate small { font-size: 11.5px; color: var(--text-secondary); }
+.qz-rate .btn.sug { border-color: var(--series-1); }
+.qz-msg { font-size: 13px; color: var(--text-secondary); min-height: 18px; margin: 4px 0; }
+.qz-err { font-size: 13px; color: var(--critical); min-height: 18px; margin: 4px 0; }
+.qz-row2 { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
 .nn-lnk { background: none; border: 0; padding: 0; font: inherit; font-weight: 700; color: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 </style>
 
@@ -311,7 +341,8 @@
 </header>
 
 <nav>
-  <button data-tab="practice" class="active">연습하기</button>
+  <button data-tab="quiz" class="active">문장 퀴즈</button>
+  <button data-tab="practice">연습하기</button>
   <button data-tab="mock">실전 모의</button>
   <button data-tab="manage">질문 관리</button>
   <button data-tab="stats">학습 통계</button>
@@ -320,8 +351,14 @@
 <main>
   <div class="notice">💾 이 앱은 브라우저를 닫으면 기록이 사라져요. <b>질문 관리 → 데이터 저장하기</b>로 JSON 파일을 내려받아 두고, 다음에 <b>데이터 불러오기</b>로 이어서 쓰세요.</div>
 
+  <!-- ============ 문장 퀴즈 탭 ============ -->
+  <section id="tab-quiz">
+    <div id="qz-home"></div>
+    <div class="card hidden" id="qz-run"></div>
+  </section>
+
   <!-- ============ 연습 탭 ============ -->
-  <section id="tab-practice">
+  <section id="tab-practice" class="hidden">
     <div class="card">
       <div class="row" style="justify-content: space-between;">
         <div class="row">
@@ -582,7 +619,7 @@ let dbLastQ = {}, dbSaving = false, dbDirty = false, dbSaveTimer = null;
 function dbProfilePayload() {
   return {
     savedAt: Date.now(), tts: state.tts, koSub: state.koSub !== false,
-    bundleApplied: state.bundleApplied | 0, history: state.history.slice(-500)
+    bundleApplied: state.bundleApplied | 0, history: state.history.slice(-500), quiz: state.quiz
   };
 }
 async function dbSaveNow() {
@@ -622,7 +659,7 @@ document.addEventListener("visibilitychange", () => {
 function persist() {
   if (store) {
     try {
-      store.setItem(STORE_KEY, JSON.stringify({ savedAt: Date.now(), questions: state.questions, history: state.history, tts: state.tts, koSub: state.koSub !== false, bundleApplied: state.bundleApplied | 0 }));
+      store.setItem(STORE_KEY, JSON.stringify({ savedAt: Date.now(), questions: state.questions, history: state.history, tts: state.tts, koSub: state.koSub !== false, bundleApplied: state.bundleApplied | 0, quiz: state.quiz }));
     } catch (e) { /* 용량 초과 등 — 조용히 무시 */ }
   }
   scheduleDbSave();
@@ -641,8 +678,11 @@ function applyData(d) {
   if (d.tts) Object.assign(state.tts = state.tts || {}, d.tts);
   state.koSub = d.koSub !== false;
   state.bundleApplied = d.bundleApplied | 0;
+  state.quiz = qzNormalize(d.quiz);
   state.nextId = Math.max(0, ...state.questions.map(q => q.id)) + 1;
 }
+
+state.quiz = qzNormalize(null); // 문장 퀴즈 기록
 
 // ---------- 샘플 질문 ----------
 const SAMPLES = [
@@ -1228,7 +1268,8 @@ document.querySelectorAll("nav button").forEach(b => {
   b.addEventListener("click", () => {
     document.querySelectorAll("nav button").forEach(x => x.classList.remove("active"));
     b.classList.add("active");
-    ["practice","mock","manage","stats"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== b.dataset.tab));
+    ["quiz","practice","mock","manage","stats"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== b.dataset.tab));
+    if (b.dataset.tab === "quiz") renderQuiz(); else quizLeave();
     if (b.dataset.tab === "stats") renderStats();
     if (b.dataset.tab === "manage") renderManage();
     if (b.dataset.tab === "practice") renderPractice();
@@ -1389,6 +1430,7 @@ function importData(name, text) {
       if (!Array.isArray(data.questions)) throw new Error("백업 파일이 손상됐어요 (questions 항목이 없어요).");
       state.questions = data.questions;
       state.history = Array.isArray(data.history) ? data.history : [];
+      state.quiz = qzNormalize(data.quiz);
       state.nextId = Math.max(0, ...state.questions.map(q => q.id)) + 1;
       return state.questions.length;
     }
@@ -1460,7 +1502,8 @@ function buildBackupJson() {
     history: state.history,
     tts: state.tts,
     koSub: state.koSub !== false,
-    bundleApplied: state.bundleApplied | 0
+    bundleApplied: state.bundleApplied | 0,
+    quiz: state.quiz
   }, null, 2);
 }
 function setExportMsg(t, ok = true) {
@@ -1518,7 +1561,7 @@ $("mg-export").addEventListener("click", async () => {
 // 내 데이터 품은 파일: 현재 질문+기록+설정이 내장된 HTML 사본을 저장한다.
 // 이 파일은 어디로 옮겨서 열어도(폰, 다른 브라우저) 데이터가 그대로 살아있다.
 $("mg-embed").addEventListener("click", async () => {
-  const data = { app: "opic-trainer", savedAt: Date.now(), questions: state.questions, history: state.history, tts: state.tts, koSub: state.koSub !== false, bundleApplied: state.bundleApplied | 0 };
+  const data = { app: "opic-trainer", savedAt: Date.now(), questions: state.questions, history: state.history, tts: state.tts, koSub: state.koSub !== false, bundleApplied: state.bundleApplied | 0, quiz: state.quiz };
   document.getElementById("embedded-data").textContent = JSON.stringify(data).replace(/</g, "\\u003c");
   const html = "\n" + document.documentElement.outerHTML;
   const fname = "opic-trainer-내데이터.html";
@@ -2527,6 +2570,275 @@ function drawTrend(data) {
   });
 }
 
+// ---------- 문장 퀴즈: 한글 문장을 보고 영어로 말하기 ----------
+// 흐름: 한글 문장 → 3초 떠올리기 → 말하기(또는 타이핑) → 단어별 채점 → 소리 듣고 따라 말하기 → 쉬움·보통·어려움 → 문장별 복습 날짜
+// 주제는 직접 고르고(자동으로 바뀌지 않는다), 주제별로 전체 문장 수와 해 본 문장 수를 보여 준다.
+const QZ_GOAL = 20, QZ_BATCH = 10, QZ_INT = [1, 3, 7, 14, 30, 60, 120];
+function qzDate(d) { return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
+function qzToday() { return qzDate(new Date()); }
+function qzAdd(k, n) { const p = k.split("-").map(Number); return qzDate(new Date(p[0], p[1] - 1, p[2] + n, 12)); }
+function qzIsDate(s) { return /^\d{4}-\d{2}-\d{2}$/.test(String(s)); }
+function qzHash(s) { let h = 5381; s = String(s); for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36); }
+// 저장 형식: topic(고른 주제), rec[문장키] = {h 문장 해시, st 단계, du 다음 복습일, n 푼 횟수, la 마지막 날, ac 마지막 정확도}, day[날짜] = 그날 푼 문장키 목록
+function qzNormalize(q) {
+  const out = { topic: "", rec: {}, day: {} };
+  if (!q || typeof q !== "object") return out;
+  out.topic = typeof q.topic === "string" ? q.topic.slice(0, 40) : "";
+  Object.keys(q.rec || {}).forEach(k => {
+    const r = q.rec[k]; if (!r || typeof r !== "object" || !qzIsDate(r.du)) return;
+    out.rec[k] = { h: String(r.h || ""), st: Math.min(QZ_INT.length, Math.max(0, r.st | 0)), du: r.du, n: Math.max(1, r.n | 0), la: qzIsDate(r.la) ? r.la : r.du, ac: Math.min(100, Math.max(0, r.ac | 0)) };
+  });
+  const from = qzAdd(qzToday(), -45);
+  Object.keys(q.day || {}).forEach(d => { if (qzIsDate(d) && d >= from && Array.isArray(q.day[d])) out.day[d] = q.day[d].filter(x => typeof x === "string").slice(0, 400); });
+  return out;
+}
+const qzTopicOf = (q) => (q.topic || "").trim() || "기타";
+function qzGroups() { const m = new Map(); state.questions.forEach(q => { const t = qzTopicOf(q); if (!m.has(t)) m.set(t, []); m.get(t).push(q); }); return m; }
+function qzSents(q) {
+  const ko = currentTrans(q);
+  return splitSentences(q.a).map((s, i) => ({ qid: q.id, si: i, en: s.trim(), ko: ko && ko[i] ? String(ko[i]).trim() : "", key: q.id + ":" + i, h: qzHash(s.trim()) }));
+}
+function qzRec(it) { const r = state.quiz.rec[it.key]; return r && r.h === it.h ? r : null; }
+function qzStat(qs) {
+  const t = qzToday(), s = { total: 0, done: 0, known: 0, due: 0, qTotal: qs.length, qTrans: 0 };
+  qs.forEach(q => {
+    if (currentTrans(q)) s.qTrans++;
+    qzSents(q).forEach(it => { s.total++; const r = qzRec(it); if (r) { s.done++; if (r.st >= 3) s.known++; if (r.du <= t) s.due++; } });
+  });
+  return s;
+}
+function qzTodayCount() { return (state.quiz.day[qzToday()] || []).length; }
+function qzReport() { try { const n = qzTodayCount(); if (n > 0 && window.__hubReport) window.__hubReport({ date: qzToday(), value: n }); } catch (e) {} }
+// 한 번에 풀 문장: 복습할 때가 된 문장 최대 6개 + 새 문장으로 채워 10개
+function qzBuildQueue(qs) {
+  const t = qzToday(), all = [];
+  qs.forEach(q => qzSents(q).forEach(it => { if (it.ko) all.push(it); }));
+  const due = all.filter(it => { const r = qzRec(it); return r && r.du <= t; }).sort((a, b) => (qzRec(a).du < qzRec(b).du ? -1 : 1));
+  const fresh = all.filter(it => !qzRec(it));
+  const out = due.slice(0, 6);
+  fresh.slice(0, QZ_BATCH - out.length).forEach(it => out.push(it));
+  if (out.length < QZ_BATCH) due.slice(6).slice(0, QZ_BATCH - out.length).forEach(it => out.push(it));
+  return out;
+}
+function qzChunks(en) {
+  const w = en.split(" "), out = []; let cur = [];
+  w.forEach((x, k) => {
+    if (k > 2 && cur.length >= 2 && /^(because|and|with|for|to|at|but|so)$/i.test(x)) { out.push(cur.join(" ")); cur = []; }
+    cur.push(x);
+    if (/,$/.test(x)) { out.push(cur.join(" ")); cur = []; }
+  });
+  if (cur.length) out.push(cur.join(" "));
+  return out;
+}
+// 말한 문장을 정답과 단어 순서대로 맞춰 본다(축약형은 풀어서 비교)
+function qzGrade(words, said) {
+  const tt = [];
+  words.forEach((w, wi) => tokenize(w).forEach(t => tt.push({ wi, t })));
+  const sw = tokenize(said), n = tt.length, m = sw.length, d = [];
+  for (let i = 0; i <= n; i++) { d[i] = new Array(m + 1).fill(0); }
+  for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) d[i][j] = tt[i - 1].t === sw[j - 1] ? d[i - 1][j - 1] + 1 : Math.max(d[i - 1][j], d[i][j - 1]);
+  const tokHit = new Array(n).fill(false);
+  let i = n, j = m;
+  while (i > 0 && j > 0) { if (tt[i - 1].t === sw[j - 1]) { tokHit[i - 1] = true; i--; j--; } else if (d[i - 1][j] >= d[i][j - 1]) i--; else j--; }
+  const wordOk = words.map(() => true), counted = words.map(() => false);
+  tt.forEach((x, k) => { counted[x.wi] = true; if (!tokHit[k]) wordOk[x.wi] = false; });
+  const cnt = counted.filter(Boolean).length, hit = words.filter((w, k) => counted[k] && wordOk[k]).length;
+  return { ok: wordOk, hit, cnt, acc: cnt ? Math.round(hit / cnt * 100) : 0 };
+}
+
+let qzMode = "home", qzBusy = false;
+const Z = { queue: [], cur: null, phase: "", hint: 0, typing: false, rec: null, recOn: false, said: "", interim: "", ok: [], acc: 0, hit: 0, cnt: 0, reveal: false, timer: 0, stats: { easy: 0, ok: 0, hard: 0 }, topic: "", words: [], total: 0, lastErr: "" };
+function qzSay(t) { const el = $("qz-msg"); if (el) el.textContent = t; }
+function qzErr(t) { const el = $("qz-err"); if (el) el.textContent = t || ""; }
+
+function renderQuiz() {
+  if (qzMode === "run") { $("qz-home").classList.add("hidden"); $("qz-run").classList.remove("hidden"); qzDraw(); return; }
+  $("qz-run").classList.add("hidden"); $("qz-home").classList.remove("hidden");
+  const groups = qzGroups(), names = Array.from(groups.keys());
+  if (!names.length) { $("qz-home").innerHTML = '<div class="card">질문이 없어요. 질문 관리에서 질문을 추가해 주세요.</div>'; return; }
+  if (!groups.has(state.quiz.topic)) state.quiz.topic = names[0];
+  const sel = state.quiz.topic, today = qzTodayCount(), pct = Math.min(100, today / QZ_GOAL * 100);
+  let h = '<div class="card"><div class="qz-top"><h2>문장 퀴즈</h2><span class="qz-sub">오늘 <b>' + today + '</b> / ' + QZ_GOAL + '문장</span></div>' +
+    '<div class="meter"><div style="width:' + pct + '%"></div></div>' +
+    '<div class="qz-sub">' + (today >= QZ_GOAL ? '오늘 목표를 채웠어요. 더 풀어도 좋아요.' : '한글 문장을 보고 영어로 말해 보세요. 한 문장씩 틈틈이 해도 괜찮아요.') + '</div></div>';
+  h += '<div class="card"><h2>주제 고르기</h2><div class="qz-sub">주제는 직접 골라요. 자동으로 바뀌지 않아요.</div><div class="qz-topics">';
+  names.forEach(name => {
+    const s = qzStat(groups.get(name)), p = s.total ? s.done / s.total * 100 : 0;
+    h += '<button type="button" class="qz-topic" data-qz-topic="' + esc(name) + '" aria-pressed="' + (name === sel) + '"><div class="qz-trow"><span class="qz-tname">' + esc(name) + '</span>' +
+      '<span class="qz-tcnt">문장 ' + s.total + '개 중 <b>' + s.done + '개</b> 해 봄' + (s.known ? ' · 익숙 ' + s.known : '') + (s.due ? ' · 복습 ' + s.due : '') + '</span></div>' +
+      '<div class="meter" style="margin:6px 0 0"><div style="width:' + p + '%"></div></div></button>';
+  });
+  h += '</div></div>';
+  const ss = qzStat(groups.get(sel)), dis = qzBusy ? ' disabled' : '';
+  h += '<div class="card"><div class="qz-top"><h2>' + esc(sel) + '</h2><span class="qz-sub">해 본 문장 ' + ss.done + ' / ' + ss.total + (ss.due ? ' · 오늘 복습할 문장 ' + ss.due + '개' : '') + '</span></div>' +
+    '<div class="qz-sub">한글 해석 준비 ' + ss.qTrans + ' / ' + ss.qTotal + '개 지문' + (ss.qTrans < ss.qTotal ? ' · 해석이 없는 지문은 시작할 때 자동으로 받아 와요' : '') + '</div>' +
+    '<div class="qz-row2"><button type="button" class="btn primary" data-qz="start"' + dis + '>▶ ' + QZ_BATCH + '문장 풀기</button>' +
+    (ss.qTrans < ss.qTotal ? '<button type="button" class="btn" data-qz="trans"' + dis + '>🌐 한글 해석 미리 받기</button>' : '') + '</div>' +
+    '<div class="qz-msg" id="qz-msg"></div>' +
+    '<div class="qz-sub" style="margin-top:6px">순서: 한글 문장 → 3초 떠올리기 → 말하기 → 단어별 채점 → 소리 듣고 따라 말하기 → 난이도 고르기. 어려웠던 문장은 오늘 한 번 더, 쉬웠던 문장은 간격을 늘려 다시 나와요.</div></div>';
+  $("qz-home").innerHTML = h;
+}
+$("qz-home").addEventListener("click", (e) => {
+  const tp = e.target.closest("[data-qz-topic]");
+  if (tp) { if (qzBusy) return; state.quiz.topic = tp.dataset.qzTopic; persist(); renderQuiz(); return; }
+  const b = e.target.closest("[data-qz]"); if (!b) return;
+  if (b.dataset.qz === "start") qzStart();
+  else if (b.dataset.qz === "trans") qzFetchTrans();
+});
+async function qzFetchTrans() {
+  if (qzBusy) return; qzBusy = true; renderQuiz();
+  const need = (qzGroups().get(state.quiz.topic) || []).filter(q => !currentTrans(q));
+  let n = 0;
+  for (const q of need) {
+    qzSay("한글 해석 받는 중… " + (n + 1) + " / " + need.length);
+    const ok = await fetchTransCore(q, null);
+    if (!ok) { qzBusy = false; renderQuiz(); qzSay("한글 해석을 가져오지 못했어요. 인터넷 연결을 확인한 뒤 다시 눌러 주세요."); return; }
+    n++;
+  }
+  qzBusy = false; renderQuiz();
+}
+async function qzStart() {
+  if (qzBusy) return; qzBusy = true;
+  try {
+    const topic = state.quiz.topic, qs = qzGroups().get(topic) || [];
+    let items = qzBuildQueue(qs), guard = 0;
+    while (items.length < QZ_BATCH && qs.some(q => !currentTrans(q)) && guard++ < 6) {
+      qzSay("한글 해석을 받아 오는 중이에요…");
+      const ok = await fetchTransCore(qs.find(q => !currentTrans(q)), null);
+      if (!ok) { qzSay("한글 해석을 가져오지 못했어요. 인터넷 연결을 확인해 주세요."); break; }
+      items = qzBuildQueue(qs);
+    }
+    if (!items.length) { qzSay("풀 문장이 없어요. 한글 해석을 받은 뒤 다시 눌러 주세요."); return; }
+    Z.queue = items; Z.stats = { easy: 0, ok: 0, hard: 0 }; Z.topic = topic; Z.total = items.length;
+    qzMode = "run"; qzBusy = false; renderQuiz(); qzNext();
+  } finally { qzBusy = false; }
+}
+
+function qzStopRec() { if (Z.rec) { try { Z.rec.stop(); } catch (e) {} } }
+function qzStopAll() {
+  clearTimeout(Z.timer);
+  if (Z.rec) { try { Z.rec.onend = null; Z.rec.onerror = null; Z.rec.stop(); } catch (e) {} Z.rec = null; }
+  Z.recOn = false; stopSpeech();
+}
+function quizLeave() { if (qzMode === "run") { qzStopAll(); if (Z.phase === "think") Z.phase = "speak"; } }
+function qzNext() {
+  clearTimeout(Z.timer);
+  if (!Z.queue.length) { Z.cur = null; Z.phase = "end"; qzDraw(); return; }
+  Z.cur = Z.queue.shift(); Z.phase = "think"; Z.hint = 0; Z.said = ""; Z.interim = ""; Z.reveal = false; Z.typing = !SR; Z.lastErr = "";
+  Z.words = Z.cur.en.split(/\s+/).filter(Boolean);
+  qzDraw();
+  const bar = $("qz-bar");
+  if (bar) requestAnimationFrame(() => requestAnimationFrame(() => { bar.style.transition = "width 3s linear"; bar.style.width = "100%"; }));
+  Z.timer = setTimeout(qzToSpeak, 3000);
+}
+function qzToSpeak() { clearTimeout(Z.timer); if (Z.phase !== "think") return; Z.phase = "speak"; qzDraw(); }
+function qzHintHtml() {
+  if (!Z.hint) return "";
+  const lab = ["덩어리로 나누기", "첫 글자", "단어 순서 섞기"][Z.hint - 1];
+  let body = "";
+  if (Z.hint === 1) body = qzChunks(Z.cur.en).map((c, i) => '<span class="qz-chip">' + (i + 1) + '덩어리 · ' + esc(c.split(" ")[0]) + ' … (' + c.split(" ").length + '단어)</span>').join("");
+  else if (Z.hint === 2) body = '<div class="mono">' + esc(Z.words.map(w => w.replace(/[A-Za-z0-9’']+/g, m => m[0] + "_".repeat(m.length - 1))).join(" ")) + '</div>';
+  else body = Z.hintOrder.map(w => '<span class="qz-chip">' + esc(w) + '</span>').join("");
+  return '<div class="qz-hint"><div class="lab">힌트 ' + Z.hint + ' / 3 · ' + lab + '</div>' + body + '</div>';
+}
+function qzDraw() {
+  const box = $("qz-run"); if (!box) return;
+  const left = Z.queue.length + (Z.cur && Z.phase !== "end" ? 1 : 0);
+  const head = '<div class="qz-top"><span class="pill">' + esc(Z.topic) + '</span><span class="qz-sub">오늘 ' + qzTodayCount() + ' / ' + QZ_GOAL + ' · 남은 문장 ' + left + '</span><button type="button" class="btn sm" data-qz="quit">그만하기</button></div>';
+  let h = head;
+  if (Z.phase === "end") {
+    const st = Z.stats;
+    h += '<h2 style="margin-top:14px">이번 묶음을 마쳤어요</h2><div class="qz-sub">' + Z.total + '문장 · 쉬웠어요 ' + st.easy + ' · 보통 ' + st.ok + ' · 어려웠어요 ' + st.hard + '. 어려웠던 문장은 오늘 다시 풀 수 있고, 나머지는 정한 날짜에 다시 나와요.</div>' +
+      '<div class="qz-row2"><button type="button" class="btn primary" data-qz="again">다음 ' + QZ_BATCH + '문장 풀기</button><button type="button" class="btn" data-qz="quit">주제 목록으로</button></div>';
+  } else if (Z.phase === "think") {
+    h += '<div class="qz-sub" style="margin-top:12px">영어로 어떻게 말할지 떠올려 보세요</div><div class="qz-ko">' + esc(Z.cur.ko) + '</div>' +
+      '<div class="qz-bar" data-qz="toSpeak" title="눌러서 바로 말하기"><i id="qz-bar"></i></div><div class="qz-sub">3초 뒤에 말하기가 시작돼요. 눌러서 바로 넘어갈 수도 있어요.</div>';
+  } else if (Z.phase === "speak") {
+    h += '<div class="qz-ko">' + esc(Z.cur.ko) + '</div>' + qzHintHtml();
+    if (!Z.typing) {
+      h += '<div class="transcript" id="qz-tr"></div><div class="qz-row2"><button type="button" class="btn ' + (Z.recOn ? "rec" : "primary") + '" data-qz="mic">' + (Z.recOn ? "⏹ 말하기 끝" : "🎤 말하기 시작") + '</button>' +
+        '<button type="button" class="btn" data-qz="typemode">⌨ 타이핑으로 답하기</button></div>';
+    } else {
+      h += '<textarea id="qz-typed" rows="2" placeholder="영어 문장을 입력해요" style="margin-top:4px"></textarea><div class="qz-row2"><button type="button" class="btn primary" data-qz="submit">제출</button>' +
+        (SR ? '<button type="button" class="btn" data-qz="typemode">🎤 말하기로 답하기</button>' : '') + '</div>' + (SR ? "" : '<div class="qz-sub">이 브라우저는 음성 인식을 지원하지 않아서 타이핑으로 답해요.</div>');
+    }
+    h += '<div class="qz-row2"><button type="button" class="btn sm" data-qz="hint">💡 막혀요 · 힌트' + (Z.hint ? ' (' + Z.hint + '/3)' : '') + '</button><button type="button" class="btn sm" data-qz="reveal">정답 보기</button></div><div class="qz-err" id="qz-err"></div>';
+  } else if (Z.phase === "result") {
+    const sug = Z.reveal ? "hard" : Z.acc >= 90 ? "easy" : Z.acc >= 60 ? "ok" : "hard";
+    h += '<div class="qz-ko">' + esc(Z.cur.ko) + '</div><div class="qz-words">' + Z.words.map((w, i) => '<span class="qz-w' + (Z.reveal ? "" : Z.ok[i] ? " hit" : " miss") + '">' + esc(w) + '</span>').join("") + '</div>' +
+      '<div class="qz-sub" style="margin-bottom:8px">' + (Z.reveal ? '정답을 보고 소리를 들으며 따라 말해 보세요.' : '맞힌 단어 ' + Z.hit + ' / ' + Z.cnt + ' (' + Z.acc + '%) · ' + (Z.acc >= 90 ? '거의 다 맞혔어요.' : Z.acc >= 60 ? '빨간 단어만 다시 말해 보세요.' : '아직 낯선 문장이에요. 소리를 듣고 따라 말해 보세요.')) + '</div>' +
+      (Z.said ? '<div class="qz-sub">내가 말한 내용: ' + esc(Z.said) + '</div>' : '') +
+      '<div class="qz-row2"><button type="button" class="sbtn" data-qz="shadow" data-owner="quiz:shadow" title="소리 듣기">🔊</button><span class="qz-sub">소리 듣고 따라 말하기</span></div>' +
+      '<div class="qz-sub">얼마나 쉬웠나요?</div><div class="qz-rate">' +
+      [["easy", "쉬웠어요", "간격을 늘려 복습"], ["ok", "보통이에요", "내일 복습"], ["hard", "어려웠어요", "오늘 한 번 더"]].map(r => '<button type="button" class="btn' + (r[0] === sug ? " sug" : "") + '" data-qz="rate" data-r="' + r[0] + '">' + r[1] + '<small>' + r[2] + '</small></button>').join("") + '</div>';
+  }
+  box.innerHTML = h;
+  if (Z.phase === "speak" && !Z.typing) qzTr();
+  if (Z.phase === "speak" && Z.typing) { const t = $("qz-typed"); if (t) t.focus(); }
+  if (Z.phase === "result") refreshSpeechUi();
+}
+function qzTr() {
+  const el = $("qz-tr"); if (!el) return;
+  const empty = !Z.said && !Z.interim;
+  el.innerHTML = empty ? '<span style="color:var(--muted)">🎤 버튼을 누르고 영어로 말해 보세요</span>' : esc(Z.said) + '<span class="interim">' + esc(Z.interim) + '</span>' + (Z.recOn ? '<span class="recdot" style="margin-left:6px"></span>' : "");
+}
+function qzStartRec() {
+  if (!SR) { qzErr("이 브라우저는 음성 인식을 지원하지 않아요. 타이핑으로 답해 주세요."); return; }
+  stopSpeech(); Z.said = ""; Z.interim = ""; Z.lastErr = "";
+  const r = makeRecognizer((fin, interim) => { Z.said = fin; Z.interim = interim; qzTr(); },
+    (fin) => {
+      if (Z.rec !== r) return;
+      Z.recOn = false; Z.rec = null;
+      const text = ((fin || "") + " " + (Z.interim || "")).trim();
+      if (text) qzSubmit(text, false);
+      else { qzDraw(); qzErr(Z.lastErr || "인식된 내용이 없어요. 다시 말하거나 타이핑으로 답해 주세요."); }
+    },
+    (code) => { Z.lastErr = code === "not-allowed" || code === "service-not-allowed" ? "마이크 사용이 막혀 있어요. 브라우저 설정에서 허용하거나 타이핑으로 답해 주세요." : code === "no-speech" ? "말소리가 들리지 않았어요. 다시 해 보세요." : "음성 인식 오류(" + code + "). 타이핑으로 답해 주세요."; });
+  Z.rec = r; Z.recOn = true;
+  try { r.start(); } catch (e) { Z.rec = null; Z.recOn = false; qzDraw(); qzErr("음성 인식을 시작하지 못했어요. 타이핑으로 답해 주세요."); return; }
+  qzDraw();
+}
+function qzSubmit(said, reveal) {
+  clearTimeout(Z.timer);
+  if (Z.rec) { try { Z.rec.onend = null; Z.rec.stop(); } catch (e) {} Z.rec = null; Z.recOn = false; }
+  Z.reveal = !!reveal; Z.said = reveal ? "" : said; Z.interim = "";
+  const g = reveal ? { ok: Z.words.map(() => false), hit: 0, cnt: Z.words.length, acc: 0 } : qzGrade(Z.words, said);
+  Z.ok = g.ok; Z.hit = g.hit; Z.cnt = g.cnt; Z.acc = g.acc; Z.phase = "result"; qzDraw();
+}
+function qzRate(r) {
+  const it = Z.cur, t = qzToday(); if (!it) return;
+  stopSpeech();
+  let rec = state.quiz.rec[it.key];
+  if (!rec || rec.h !== it.h) rec = { h: it.h, st: 0, du: t, n: 0, la: t, ac: 0 };
+  rec.n++; rec.la = t; rec.ac = Z.acc;
+  if (r === "easy") { rec.st = Math.min(QZ_INT.length, rec.st + 1); rec.du = qzAdd(t, QZ_INT[rec.st - 1]); }
+  else if (r === "ok") rec.du = qzAdd(t, 1);
+  else { rec.st = Math.max(0, rec.st - 1); rec.du = t; }
+  state.quiz.rec[it.key] = rec;
+  const day = state.quiz.day[t] = state.quiz.day[t] || [];
+  if (day.indexOf(it.key) < 0) day.push(it.key);
+  Z.stats[r]++;
+  if (r === "hard" && (it.tries | 0) < 2) { it.tries = (it.tries | 0) + 1; Z.queue.push(it); } // 어려웠던 문장은 오늘 끝나기 전에 한 번 더
+  persist(); qzReport(); qzNext();
+}
+$("qz-run").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-qz]"); if (!b) return;
+  const a = b.dataset.qz;
+  if (a === "quit") { qzStopAll(); qzMode = "home"; renderQuiz(); }
+  else if (a === "again") { qzMode = "home"; renderQuiz(); qzStart(); }
+  else if (a === "toSpeak") qzToSpeak();
+  else if (a === "mic") { if (Z.recOn) qzStopRec(); else qzStartRec(); }
+  else if (a === "typemode") { qzStopAll(); Z.typing = !Z.typing; qzDraw(); }
+  else if (a === "submit") { const v = ($("qz-typed") || {}).value || ""; if (!v.trim()) { qzErr("영어 문장을 입력한 뒤에 제출해 주세요"); return; } qzSubmit(v.trim(), false); }
+  else if (a === "hint") {
+    if (!Z.hintOrder || Z.hintFor !== Z.cur.key + ":" + Z.queue.length) { Z.hintOrder = Z.words.slice().sort(() => Math.random() - 0.5); Z.hintFor = Z.cur.key + ":" + Z.queue.length; }
+    Z.hint = Math.min(3, Z.hint + 1); const said = Z.said, typed = ($("qz-typed") || {}).value; qzDraw(); if ($("qz-typed") && typed) $("qz-typed").value = typed;
+  }
+  else if (a === "reveal") { qzStopAll(); qzSubmit("", true); }
+  else if (a === "shadow") toggleSpeak("quiz:shadow", Z.cur.en);
+  else if (a === "rate") qzRate(b.dataset.r);
+});
+
 // ---------- 초기화 ----------
 // 데이터 우선순위: 계정 저장소(아트팩트) vs 브라우저 자동 저장 vs 파일 내장 데이터 중 더 최신 것
 async function initApp() {
@@ -2543,7 +2855,7 @@ async function initApp() {
         dbData = validData({
           questions,
           history: Array.isArray(p.history) ? p.history : [],
-          tts: p.tts, koSub: p.koSub, bundleApplied: p.bundleApplied,
+          tts: p.tts, koSub: p.koSub, bundleApplied: p.bundleApplied, quiz: p.quiz,
           savedAt: incomplete ? 1 : (p.savedAt || 1)
         });
         if (dbData) qs.docs.forEach(d => { const q = d.data(); dbLastQ[String(q.id)] = JSON.stringify(q); });
@@ -2594,6 +2906,7 @@ async function initApp() {
   }
   renderManage();
   renderPractice();
+  renderQuiz();
 }
 initApp();
 </script>

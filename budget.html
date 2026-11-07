@@ -324,6 +324,44 @@
   .preview-row .pinfo{flex:1;min-width:0;}
   .preview-row .pmemo{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   .preview-row .pdate{font-size:11px;color:var(--muted);}
+  .btn-search{margin-left:8px;border:1px solid var(--paper-line);background:#fff;color:var(--ink-soft);border-radius:999px;padding:4px 11px;font-size:12px;font-weight:700;cursor:pointer;vertical-align:middle;}
+  .sq-sum{background:var(--card);border-radius:14px;padding:14px 16px;margin-top:12px;box-shadow:var(--shadow);}
+  .sq-sum .big{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums;}
+  .sq-sum .big.exp{color:var(--expense);} .sq-sum .big.inc{color:var(--income);}
+  .sq-sum .meta{font-size:12px;color:var(--muted);margin-top:4px;}
+  .sq-block{margin-top:14px;}
+  .sq-block .bt{font-size:12.5px;font-weight:800;color:var(--ink-soft);margin-bottom:6px;}
+  .sq-line{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:13px;}
+  .sq-line .n{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .sq-line .c{color:var(--muted);font-size:11.5px;flex-shrink:0;}
+  .sq-line .v{font-weight:700;font-variant-numeric:tabular-nums;flex-shrink:0;}
+  .sq-line .bar{width:60px;height:6px;background:#EEEEF0;border-radius:6px;overflow:hidden;flex-shrink:0;}
+  .sq-line .bar i{display:block;height:100%;background:var(--expense);border-radius:6px;}
+  .sq-row{display:flex;align-items:center;gap:10px;background:var(--card);border-radius:10px;padding:9px 12px;margin-bottom:6px;cursor:pointer;box-shadow:var(--shadow);}
+  .sq-row .d{font-size:11.5px;color:var(--muted);flex-shrink:0;width:74px;}
+  .sq-row .m{flex:1;min-width:0;font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .sq-row .m span{display:block;font-size:11px;font-weight:400;color:var(--muted);}
+  .sq-row .a{font-size:13.5px;font-weight:800;font-variant-numeric:tabular-nums;flex-shrink:0;}
+  .sq-row .a.expense{color:var(--expense);} .sq-row .a.income{color:var(--income);}
+  .recur-sum{background:var(--recurring-bg);border-radius:14px;padding:12px 14px;margin:10px 0 12px;}
+  .recur-sum .rs-main{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:13px;font-weight:700;color:var(--recurring);}
+  .recur-sum .rs-main b{font-size:20px;font-weight:800;font-variant-numeric:tabular-nums;}
+  .recur-sum .rs-sub{font-size:11.5px;color:var(--muted);margin-top:3px;}
+  .recur-sum .rs-grid{display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;}
+  .recur-sum .rs-grid > div{flex:1;min-width:110px;background:rgba(255,255,255,.7);border-radius:10px;padding:8px 10px;}
+  .recur-sum .rs-grid span{display:block;font-size:11px;color:var(--muted);}
+  .recur-sum .rs-grid b{font-size:14px;font-weight:800;font-variant-numeric:tabular-nums;}
+  .var-banner{background:var(--recurring-bg);border-radius:14px;padding:12px 14px;margin:14px 0 4px;}
+  .var-banner .vt{font-size:13px;font-weight:800;color:var(--recurring);margin-bottom:6px;}
+  .var-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 0;border-top:1px dashed rgba(217,80,154,.3);}
+  .var-row:first-of-type{border-top:none;}
+  .var-row .vn{flex:1;min-width:120px;font-size:13.5px;font-weight:700;}
+  .var-row .vh{display:block;font-size:11px;font-weight:500;color:var(--muted);}
+  .var-row input{width:110px;border:1px solid var(--paper-line);border-radius:8px;padding:7px 8px;font-size:13.5px;background:#fff;}
+  .var-row button{border:none;border-radius:8px;padding:8px 12px;font-size:12.5px;font-weight:700;cursor:pointer;}
+  .var-row .var-add{background:var(--recurring);color:#fff;}
+  .var-row .var-skip{background:transparent;color:var(--muted);}
+  .preview-row .pfixrow{display:flex;flex-wrap:wrap;gap:2px 12px;}
   .preview-row.fixed{box-shadow:inset 3px 0 0 var(--recurring);}
   .preview-row .pfix{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;color:var(--recurring);margin-top:3px;cursor:pointer;}
   .preview-row .pfix input[type=checkbox]{width:14px;height:14px;}
@@ -497,6 +535,8 @@
     </div>
   </div>
 
+  <div id="varBanner"></div>
+
   <div class="section-title">카테고리별 지출</div>
   <div class="cat-card" id="catCard"></div>
 
@@ -508,7 +548,7 @@
   <div class="cat-card" id="accountBalanceCard"></div>
 
   <div class="section-title">
-    <span>내역</span>
+    <span>내역<button class="btn-search" id="btnSearch" type="button">🔎 검색·합계</button></span>
     <div class="view-toggle">
       <button id="viewList" class="vtab on">리스트</button>
       <button id="viewCalendar" class="vtab">캘린더</button>
@@ -684,6 +724,7 @@ KB국민카드승인
 <div class="overlay" id="recurOverlay">
   <div class="sheet">
     <h2>고정비 관리</h2>
+    <div id="recurSum"></div>
     <div id="recurList"></div>
     <div class="section-title" style="margin-top:18px;">고정비 추가</div>
     <div class="seg">
@@ -695,14 +736,21 @@ KB국민카드승인
       <input type="text" id="rName" placeholder="예: 월세, 넷플릭스, 급여">
     </div>
     <div class="field">
-      <label>금액</label>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="rVariable" style="width:18px;height:18px;">
+        <span>금액이 매달 달라요 (관리비, 공과금 등)</span>
+      </label>
+      <div class="sms-hint" id="rVarHint" style="display:none;margin-top:6px;">변동 고정비는 자동으로 입력하지 않아요. 날짜가 되면 메인 화면에 "이번 달 아직 없어요"로 알려 주고, 그때 금액을 입력해요. 내역서를 올릴 때는 이름이 같으면 금액이 달라도 연결할 수 있어요.</div>
+    </div>
+    <div class="field">
+      <label id="rAmountLabel">금액</label>
       <input type="number" inputmode="numeric" id="rAmount" placeholder="0">
     </div>
     <div class="field">
       <label>매월 며칠</label>
       <div class="day-field">
         <input type="number" id="rDay" min="1" max="31" value="1">
-        <span class="day-suffix">일에 자동 등록</span>
+        <span class="day-suffix" id="rDaySuffix">일에 자동 등록</span>
       </div>
     </div>
     <div class="field">
@@ -895,6 +943,22 @@ KB국민카드승인
     <div class="btn-row">
       <button class="btn secondary" id="installmentClose">닫기</button>
       <button class="btn primary" id="ipSave">할부 등록</button>
+    </div>
+  </div>
+</div>
+
+<!-- Search & Sum Sheet -->
+<div class="overlay" id="searchOverlay">
+  <div class="sheet">
+    <h2>내역 검색·합계</h2>
+    <div class="field">
+      <input type="text" id="sqText" placeholder="가맹점·메모·카테고리 (예: 스타벅스, 주유)" autocomplete="off">
+    </div>
+    <div class="chips" id="sqType" style="margin-bottom:8px;"></div>
+    <div class="chips" id="sqPeriod"></div>
+    <div id="sqBody"></div>
+    <div class="btn-row" style="margin-top:14px;">
+      <button class="btn secondary" id="sqClose">닫기</button>
     </div>
   </div>
 </div>
@@ -1098,16 +1162,19 @@ function detectColumns(headers){
   };
   const dateCol = findBy(['이용일자','거래일자','승인일자','매출일자','사용일자','카드사용일','이용일시','거래일시','이용일','거래일','승인일','사용일','일자','날짜']);
   const amountCol = findBy(['승인금액','이용금액','매출금액','거래금액','원화금액','청구금액','결제금액','승인액','이용액','금액']);
-  const merchantCol = findBy(['가맹점명','가맹점','이용처','상호명','상호','거래내용','내용']);
+  // 카드사마다 이름 열 제목이 달라요(KB국민카드는 "가맹정명"으로 적혀 있어요). "가맹점 정보"처럼 이름이 아닌 열은 건너뛰어요.
+  const merchantCol = findBy(['가맹점명','가맹정명','이용가맹점','이용처','상호명','상호','거래내용'])
+    || headers.find(hh => { const n = normalizeHeader(hh); return n.includes('가맹점') && !n.includes('정보'); })
+    || findBy(['내용']);
   const installCol = findBy(['할부','이용구분','결제구분','거래구분']);
-  const statusCol = findBy(['승인구분','승인상태','거래상태','취소구분','상태구분']);
+  const statusCol = findBy(['승인구분','승인상태','거래상태','취소구분','상태구분']) || headers.find(hh => normalizeHeader(hh) === '상태') || null;
   return { dateCol, amountCol, merchantCol, installCol, statusCol };
 }
 
 function scoreHeaderRow(row){
   const patterns = ['승인금액','이용금액','매출금액','거래금액','원화금액','청구금액','결제금액','금액',
     '이용일자','거래일자','승인일자','매출일자','사용일자','카드사용일','이용일시','거래일시','사용일','일자','날짜',
-    '가맹점명','가맹점','이용처','상호명','상호','거래내용','내용','카드번호','할부','승인구분','승인상태','거래상태'];
+    '가맹점명','가맹정명','가맹점','이용처','상호명','상호','거래내용','내용','카드번호','할부','승인구분','승인상태','거래상태'];
   let score = 0;
   (row || []).forEach(cell => {
     const norm = normalizeHeader(cell);
@@ -1251,7 +1318,11 @@ function normMerchant(s){ return String(s || '').replace(/\s+/g, '').toLowerCase
 function findRecurMatch(r){
   const n = normMerchant(r.merchant);
   if(!n) return null;
-  return (data.recurring || []).find(x => x.type === 'expense' && x.amount === r.amount && normMerchant(x.name) === n) || null;
+  const list = (data.recurring || []).filter(x => x.type === 'expense');
+  // 금액이 정해진 고정비는 이름과 금액이 모두 같을 때, 변동 고정비는 이름만 맞으면(금액이 달라도) 같은 고정비로 본다
+  return list.find(x => !x.variable && x.amount === r.amount && normMerchant(x.name) === n)
+    || list.find(x => { if(!x.variable || x.active === false) return false; const a = normMerchant(x.name); return a.length >= 2 && (n.includes(a) || a.includes(n)); })
+    || null;
 }
 function recurDoneIn(rec, mk){ return rec.lastApplied === mk || (data.entries || []).some(e => e.recurringId === rec.id && e.date && e.date.slice(0, 7) === mk); }
 
@@ -1293,8 +1364,11 @@ function renderPreview(){
       <div class="pinfo">
         <div class="pmemo">${h(r.merchant || '내역')}</div>
         <div class="pdate">${r.date}</div>
-        <label class="pfix"><input type="checkbox" class="prow-fix" data-i="${i}" ${r.fixed?'checked':''}>🔁 ${r.match ? '등록된 고정비로 연결' : '고정비로 등록'}</label>
-        ${r.match ? `<div class="pnote">같은 이름·금액의 고정비가 이미 있어요${recurDoneIn(r.match, r.date.slice(0, 7)) ? ' · 그 달 고정비 내역이 이미 있어서 중복일 수 있어요' : ' · 체크하면 그 고정비에 연결돼서 이번 달에 중복으로 들어오지 않아요'}</div>` : ''}
+        <div class="pfixrow">
+          <label class="pfix"><input type="checkbox" class="prow-fix" data-i="${i}" ${r.fixed?'checked':''}>🔁 ${r.match ? '등록된 고정비로 연결' : '고정비로 등록'}</label>
+          ${r.match ? '' : `<label class="pfix pvar" style="display:${r.fixed ? 'inline-flex' : 'none'};"><input type="checkbox" class="prow-var" data-i="${i}" ${r.variable?'checked':''}>금액이 매달 달라요</label>`}
+        </div>
+        ${r.match ? `<div class="pnote">${r.match.variable ? `변동 고정비 "${h(r.match.name)}"와 이름이 같아요(금액이 달라도 연결할 수 있어요)` : '같은 이름·금액의 고정비가 이미 있어요'}${recurDoneIn(r.match, r.date.slice(0, 7)) ? ' · 그 달 고정비 내역이 이미 있어서 중복일 수 있어요' : ' · 체크하면 그 고정비에 연결돼서 이번 달에 중복으로 들어오지 않아요'}</div>` : ''}
       </div>
       <select data-i="${i}" class="prow-cat">
         ${expCatNames().map(c=>`<option value="${c}" ${c===r.category?'selected':''}>${c}</option>`).join('')}
@@ -1312,7 +1386,11 @@ function renderPreview(){
       r.fixed = el.checked;
       if(el.checked){ r.include = true; row.querySelector('.prow-check').checked = true; } // 고정비로 등록하면 이 내역도 함께 추가
       row.classList.toggle('fixed', el.checked);
+      const vl = row.querySelector('.pvar'); if(vl) vl.style.display = el.checked ? 'inline-flex' : 'none';
     });
+  });
+  $('previewTable').querySelectorAll('.prow-var').forEach(el=>{
+    el.addEventListener('change', ()=>{ parsedRows[+el.getAttribute('data-i')].variable = el.checked; });
   });
   $('previewTable').querySelectorAll('.prow-cat').forEach(el=>{
     el.addEventListener('change', ()=>{ parsedRows[+el.getAttribute('data-i')].category = el.value; });
@@ -1346,12 +1424,14 @@ async function confirmUpload(){
         rec = {
           id: genId(), name: r.merchant || '고정비', amount: r.amount, day: parseInt(r.date.slice(8, 10), 10) || 1,
           type: 'expense', category: r.category, payer: myName, active: true, lastApplied: mk,
-          method: 'card', cardName: uploadSelectedCard || null
+          method: 'card', cardName: uploadSelectedCard || null,
+          variable: !!r.variable, lastAmount: r.amount // 변동 고정비면 다음 달부터는 자동으로 넣지 않고 금액을 입력하라고 알려 준다
         };
         data.recurring.push(rec);
         newFixed++;
-      } else if(!rec.lastApplied || rec.lastApplied < mk){
-        rec.lastApplied = mk;
+      } else {
+        if(!rec.lastApplied || rec.lastApplied < mk) rec.lastApplied = mk;
+        if(rec.variable) rec.lastAmount = r.amount; // 변동 고정비는 이번 달 금액을 기록해 둔다
       }
     }
     let id = genId();
@@ -1447,6 +1527,7 @@ function applyDueRecurring(){
   let count = 0;
   (data.recurring || []).forEach(r => {
     if(!r.active) return;
+    if(r.variable) return; // 변동 고정비는 금액을 모르니 자동으로 넣지 않는다(메인 화면에서 금액을 입력)
     if(r.lastApplied === mk) return;
     const day = Math.min(r.day || 1, daysInMonth(now.getFullYear(), now.getMonth()));
     if(now.getDate() < day) return;
@@ -1722,6 +1803,7 @@ function render(){
   const mExpense = monthEntries.filter(e=>e.type==='expense').reduce((s,e)=>s+e.amount,0);
   $('monthIncome').textContent = won(mIncome);
   $('monthExpense').textContent = won(mExpense);
+  renderVarBanner();
 
   // category breakdown (expense only)
   const catCard = $('catCard');
@@ -2063,6 +2145,10 @@ async function saveEntry(){
     const e = data.entries.find(x=>x.id===editingId);
     if(!e){ toast('다른 기기에서 삭제된 내역이에요'); closeSheet(); render(); return; }
     Object.assign(e, { type:curType, amount, date, category:curCategory, subcategory, memo, payer, method, cardName, account });
+    if(e.recurringId){ // 변동 고정비 내역의 금액을 고치면 "지난번 금액"도 같이 맞춘다
+      const rr = (data.recurring || []).find(x => x.id === e.recurringId);
+      if(rr && rr.variable && e.date.slice(0, 7) === rr.lastApplied) rr.lastAmount = amount;
+    }
   } else {
     data.entries.push({
       id: genId(),
@@ -2477,27 +2563,114 @@ function renderRecurCategoryChips(){
   });
 }
 
+// ---- 변동 고정비: 금액이 매달 달라지는 고정비(관리비 등). 자동으로 넣지 않고, 날짜가 되면 알려 준다 ----
+function dueVariableRecur(){
+  const now = new Date(), mk = monthKey(now);
+  return (data.recurring || []).filter(r => r.active && r.variable && !recurDoneIn(r, mk) &&
+    now.getDate() >= Math.min(r.day || 1, daysInMonth(now.getFullYear(), now.getMonth())));
+}
+function renderVarBanner(){
+  const box = $('varBanner'); if(!box) return;
+  if(monthKey(cur) !== monthKey(new Date())){ box.innerHTML = ''; return; } // 지금 달을 볼 때만 보여 준다
+  const list = dueVariableRecur();
+  if(!list.length){ box.innerHTML = ''; return; }
+  box.innerHTML = `<div class="var-banner"><div class="vt">🔁 이번 달 변동 고정비 ${list.length}건이 아직 없어요</div>` + list.map(r => {
+    const hint = r.lastAmount ? `지난번 ${won(r.lastAmount)} · ` : (r.amount ? `예상 ${won(r.amount)} · ` : '');
+    return `<div class="var-row" data-id="${r.id}"><div class="vn">${h(r.name)}<span class="vh">${hint}매월 ${r.day}일</span></div>
+      <input type="number" inputmode="numeric" class="var-amt" placeholder="이번 달 금액">
+      <button class="var-add" type="button">추가</button><button class="var-skip" type="button">이번 달 없음</button></div>`;
+  }).join('') + `</div>`;
+}
+async function addVariableEntry(rec, amount){
+  const now = new Date(), mk = monthKey(now);
+  const day = Math.min(rec.day || 1, daysInMonth(now.getFullYear(), now.getMonth()));
+  const date = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(day)}`;
+  let id = `rec-${rec.id}-${mk}`;
+  if(data.entries.some(e => e.id === id)) id = genId();
+  data.entries.push({
+    id, type: rec.type, amount, date, category: rec.category, memo: rec.name, payer: rec.payer || myName, recurringId: rec.id,
+    method: rec.type === 'expense' ? (rec.method || null) : null, cardName: rec.type === 'expense' ? (rec.cardName || null) : null
+  });
+  rec.lastApplied = mk; rec.lastAmount = amount;
+  await saveData();
+  render();
+  toast(`${rec.name} ${won(amount)}을 추가했어요`);
+}
+$('varBanner').addEventListener('click', async (ev) => {
+  const row = ev.target.closest('.var-row'); if(!row) return;
+  const rec = (data.recurring || []).find(x => x.id === row.getAttribute('data-id')); if(!rec) return;
+  if(ev.target.closest('.var-add')){
+    const amount = parseInt(row.querySelector('.var-amt').value, 10);
+    if(!amount || amount <= 0){ toast('이번 달 금액을 입력해주세요'); return; }
+    await addVariableEntry(rec, amount);
+  } else if(ev.target.closest('.var-skip')){
+    rec.lastApplied = monthKey(new Date()); // 이번 달은 건너뛴다
+    await saveData();
+    render();
+    toast(`${rec.name}은 이번 달 건너뛰었어요`);
+  }
+});
+
+// 고정비 합산: 매월 예상 합계, 이번 달 실제, 올해 누계 (사용 중인 고정비 기준)
+function recurStat(r){
+  let n = 0, sum = 0;
+  (data.entries || []).forEach(e => { if(e.recurringId === r.id){ n++; sum += e.amount; } });
+  return { n, sum };
+}
+function renderRecurSummary(){
+  const box = $('recurSum'); if(!box) return;
+  const all = data.recurring || [];
+  if(!all.length){ box.innerHTML = ''; return; }
+  const act = all.filter(r => r.active), exp = act.filter(r => r.type === 'expense'), inc = act.filter(r => r.type === 'income');
+  const fixedExp = exp.filter(r => !r.variable).reduce((s, r) => s + r.amount, 0);
+  const vars = exp.filter(r => r.variable);
+  const varKnown = vars.filter(r => r.lastAmount || r.amount);
+  const varExp = varKnown.reduce((s, r) => s + (r.lastAmount || r.amount), 0);
+  const varUnknown = vars.length - varKnown.length;
+  const monthTotal = fixedExp + varExp;
+  const incTotal = inc.reduce((s, r) => s + (r.variable ? (r.lastAmount || r.amount || 0) : r.amount), 0);
+  const now = new Date(), mk = monthKey(now), yk = String(now.getFullYear());
+  let thisMonth = 0, thisYear = 0;
+  (data.entries || []).forEach(e => {
+    if(!e.recurringId || e.type !== 'expense') return;
+    if(e.date.slice(0, 7) === mk) thisMonth += e.amount;
+    if(e.date.slice(0, 4) === yk) thisYear += e.amount;
+  });
+  const approx = vars.length ? '약 ' : '';
+  box.innerHTML = `<div class="recur-sum">
+    <div class="rs-main"><span>매월 지출 고정비</span><b>${approx}${won(monthTotal)}</b></div>
+    <div class="rs-sub">금액 고정 ${won(fixedExp)}${vars.length ? ` + 변동 ${vars.length}건 ${varKnown.length ? '약 ' + won(varExp) + '(지난번·예상 금액 기준)' : '(금액 미정)'}${varUnknown && varKnown.length ? ` · 금액을 모르는 ${varUnknown}건 제외` : ''}` : ''} · 연 환산 약 ${won(monthTotal * 12)}</div>
+    <div class="rs-grid">
+      <div><span>이번 달 고정비 (실제)</span><b>${won(thisMonth)}</b></div>
+      <div><span>${yk}년 누계 (실제)</span><b>${won(thisYear)}</b></div>
+      ${inc.length ? `<div><span>매월 고정 수입</span><b>${won(incTotal)}</b></div>` : ''}
+    </div>
+    <div class="rs-sub" style="margin-top:6px;">꺼 둔 항목은 합계에서 빠져요. 실제 금액은 고정비로 표시된 내역을 더한 값이에요.</div>
+  </div>`;
+}
+
 function renderRecurList(){
+  renderRecurSummary();
   const list = $('recurList');
   if(!data.recurring || data.recurring.length === 0){
     list.innerHTML = `<div class="empty-cat">등록된 고정비가 없어요</div>`;
     return;
   }
-  list.innerHTML = data.recurring.map(r => `
+  list.innerHTML = data.recurring.map(r => { const st = recurStat(r); return `
     <div class="recur-item ${r.type}">
       <label class="switch"><input type="checkbox" class="recur-active" data-id="${r.id}" ${r.active?'checked':''}><span class="slider"></span></label>
       <div class="mid">
         <div class="name">${h(r.name)}</div>
-        <div class="meta">매월 ${r.day}일 · ${r.category}</div>
+        <div class="meta">매월 ${r.day}일 · ${r.category}${r.variable ? ` · 변동 (${r.lastAmount ? '지난번 ' + won(r.lastAmount) : (r.amount ? '예상 ' + won(r.amount) : '금액 미정')})` : ''}${st.n ? ` · 누적 ${won(st.sum)} (${st.n}회)` : ''}</div>
       </div>
-      <div class="amt">${r.amount.toLocaleString('ko-KR')}원</div>
+      <div class="amt">${r.variable ? '<span style="font-size:12px;">변동</span>' : r.amount.toLocaleString('ko-KR') + '원'}</div>
       <button class="del" data-id="${r.id}">✕</button>
     </div>
-  `).join('');
+  `; }).join('');
   list.querySelectorAll('.recur-active').forEach(el => {
     el.addEventListener('change', async () => {
       const r = data.recurring.find(x => x.id === el.getAttribute('data-id'));
-      if(r){ r.active = el.checked; await saveData(); }
+      if(r){ r.active = el.checked; await saveData(); renderRecurSummary(); render(); }
     });
   });
   list.querySelectorAll('.del').forEach(el => {
@@ -2514,6 +2687,7 @@ function openRecurManage(){
   recurType = 'expense'; recurCategory = null;
   $('rSegExpense').classList.add('on'); $('rSegIncome').classList.remove('on');
   $('rName').value = ''; $('rAmount').value = ''; $('rDay').value = 1; $('rPayer').value = myName;
+  $('rVariable').checked = false; syncRecurVariable();
   renderRecurCategoryChips();
   renderRecurList();
   $('recurOverlay').classList.add('show');
@@ -2523,18 +2697,28 @@ async function saveRecurring(){
   const name = $('rName').value.trim();
   const amount = parseInt($('rAmount').value, 10);
   const day = Math.min(31, Math.max(1, parseInt($('rDay').value, 10) || 1));
+  const variable = $('rVariable').checked;
   if(!name){ toast('이름을 입력해주세요'); return; }
-  if(!amount || amount <= 0){ toast('금액을 입력해주세요'); return; }
+  if(!variable && (!amount || amount <= 0)){ toast('금액을 입력해주세요'); return; }
   data.recurring = data.recurring || [];
   data.recurring.push({
-    id: genId(), name, amount, day, type: recurType, category: recurCategory,
-    payer: $('rPayer').value.trim() || myName, active: true, lastApplied: null
+    id: genId(), name, amount: amount > 0 ? amount : 0, day, type: recurType, category: recurCategory,
+    payer: $('rPayer').value.trim() || myName, active: true, lastApplied: null,
+    variable, lastAmount: variable && amount > 0 ? amount : null
   });
   await saveData();
-  $('rName').value = ''; $('rAmount').value = ''; $('rDay').value = 1;
+  $('rName').value = ''; $('rAmount').value = ''; $('rDay').value = 1; $('rVariable').checked = false; syncRecurVariable();
   renderRecurList();
-  toast('고정비를 추가했어요');
+  render();
+  toast(variable ? '변동 고정비를 추가했어요' : '고정비를 추가했어요');
 }
+function syncRecurVariable(){
+  const v = $('rVariable').checked;
+  $('rAmountLabel').textContent = v ? '예상 금액 (선택, 비워도 돼요)' : '금액';
+  $('rDaySuffix').textContent = v ? '일부터 이번 달 금액 입력을 알려요' : '일에 자동 등록';
+  $('rVarHint').style.display = v ? 'block' : 'none';
+}
+$('rVariable').addEventListener('change', syncRecurVariable);
 
 // ---- Installment (할부) management ----
 function renderIpCardChips(){
@@ -2900,6 +3084,85 @@ $('btnInstallmentManage').addEventListener('click', openInstallmentManage);
 $('installmentClose').addEventListener('click', ()=> $('installmentOverlay').classList.remove('show'));
 $('ipSave').addEventListener('click', saveInstallmentPlan);
 $('installmentOverlay').addEventListener('click', (e)=>{ if(e.target.id==='installmentOverlay') $('installmentOverlay').classList.remove('show'); });
+
+// ---- 내역 검색·합계: 같은 가맹점(메모)·카테고리의 내역을 찾아 합산한다 ----
+let sqType = 'expense', sqPeriod = 'all', sqLimit = 50;
+const SQ_TYPES = [['expense', '지출'], ['income', '수입'], ['all', '전체']];
+const SQ_PERIODS = [['all', '전체 기간'], ['year', '올해'], ['3m', '최근 3개월'], ['month', '이번 달']];
+function sqFromDate(){
+  const now = new Date();
+  if(sqPeriod === 'year') return `${now.getFullYear()}-01-01`;
+  if(sqPeriod === '3m'){ const d = new Date(now.getFullYear(), now.getMonth() - 2, 1); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-01`; }
+  if(sqPeriod === 'month') return `${monthKey(now)}-01`;
+  return null;
+}
+function sqMatches(q){
+  const key = normMerchant(q), from = sqFromDate();
+  if(!key) return [];
+  return data.entries.filter(e =>
+    (sqType === 'all' || e.type === sqType) && (!from || e.date >= from) &&
+    [e.memo, e.category, e.subcategory].some(v => v && normMerchant(v).includes(key))
+  ).sort((a, b) => a.date < b.date ? 1 : a.date > b.date ? -1 : 0);
+}
+function renderSearch(){
+  $('sqType').innerHTML = SQ_TYPES.map(([k, t]) => `<div class="chip ${k === sqType ? 'on' : ''}" data-k="${k}">${t}</div>`).join('');
+  $('sqPeriod').innerHTML = SQ_PERIODS.map(([k, t]) => `<div class="chip ${k === sqPeriod ? 'on' : ''}" data-k="${k}">${t}</div>`).join('');
+  const q = $('sqText').value.trim(), body = $('sqBody');
+  if(!q){ body.innerHTML = `<div class="empty-cat" style="margin-top:12px;">찾을 가맹점이나 메모를 입력해 주세요.<br>같은 곳에서 쓴 내역과 합계를 보여 드려요.</div>`; return; }
+  const list = sqMatches(q);
+  if(!list.length){ body.innerHTML = `<div class="empty-cat" style="margin-top:12px;">"${h(q)}"와 일치하는 내역이 없어요</div>`; return; }
+  const expL = list.filter(e => e.type === 'expense'), incL = list.filter(e => e.type === 'income');
+  const sum = (a) => a.reduce((s, e) => s + e.amount, 0);
+  const main = sqType === 'income' ? incL : expL;
+  const mainTotal = sum(main), mainCnt = main.length;
+  const dates = list.map(e => e.date).sort();
+  let h1 = `<div class="sq-sum">`;
+  if(sqType === 'all'){
+    h1 += `<div class="meta">지출 합계</div><div class="big exp">${won(sum(expL))}</div><div class="meta">${expL.length}건</div>` +
+      (incL.length ? `<div class="meta" style="margin-top:8px;">수입 합계</div><div class="big inc">${won(sum(incL))}</div><div class="meta">${incL.length}건</div>` : '');
+  } else {
+    h1 += `<div class="meta">${sqType === 'income' ? '수입' : '지출'} 합계</div><div class="big ${sqType === 'income' ? 'inc' : 'exp'}">${won(mainTotal)}</div>` +
+      `<div class="meta">${mainCnt}건 · 평균 ${won(mainCnt ? Math.round(mainTotal / mainCnt) : 0)} · 최대 ${won(main.reduce((m, e) => Math.max(m, e.amount), 0))}</div>`;
+  }
+  h1 += `<div class="meta">${dates[0]} ~ ${dates[dates.length - 1]}</div></div>`;
+  // 이름(가맹점)별 합계: 검색어에 걸린 곳이 여러 곳이면 곳별로 나눠서 보여 준다
+  const byName = {};
+  list.forEach(e => { if(sqType !== 'all' && e.type !== sqType) return; const k = (e.memo || '').trim() || '(메모 없음)'; (byName[k] = byName[k] || { n: 0, s: 0 }); byName[k].n++; byName[k].s += e.amount; });
+  const names = Object.entries(byName).sort((a, b) => b[1].s - a[1].s);
+  if(names.length > 1 && sqType !== 'all'){
+    const max = names[0][1].s;
+    h1 += `<div class="sq-block"><div class="bt">가맹점·메모별 합계</div>` + names.slice(0, 8).map(([k, v]) =>
+      `<div class="sq-line"><span class="n">${h(k)}</span><span class="c">${v.n}건</span><span class="bar"><i style="width:${Math.max(6, Math.round(v.s / max * 100))}%"></i></span><span class="v">${v.s.toLocaleString('ko-KR')}원</span></div>`).join('') +
+      (names.length > 8 ? `<div class="sq-line"><span class="c">외 ${names.length - 8}곳</span></div>` : '') + `</div>`;
+  }
+  // 월별 합계 (최근 12개월)
+  if(sqType !== 'all'){
+    const byMonth = {};
+    main.forEach(e => { const m = e.date.slice(0, 7); (byMonth[m] = byMonth[m] || { n: 0, s: 0 }); byMonth[m].n++; byMonth[m].s += e.amount; });
+    const months = Object.entries(byMonth).sort((a, b) => a[0] < b[0] ? 1 : -1).slice(0, 12);
+    if(months.length > 1){
+      const max = Math.max(...months.map(([, v]) => v.s));
+      h1 += `<div class="sq-block"><div class="bt">월별 합계</div>` + months.map(([m, v]) =>
+        `<div class="sq-line"><span class="n">${m}</span><span class="c">${v.n}건</span><span class="bar"><i style="width:${Math.max(6, Math.round(v.s / max * 100))}%"></i></span><span class="v">${v.s.toLocaleString('ko-KR')}원</span></div>`).join('') + `</div>`;
+    }
+  }
+  h1 += `<div class="sq-block"><div class="bt">내역 ${list.length}건</div>` + list.slice(0, sqLimit).map(e =>
+    `<div class="sq-row" data-id="${e.id}"><div class="d">${e.date}</div><div class="m">${h(e.memo || '(메모 없음)')}<span>${h(e.category || '')}${e.recurringId ? ' · 고정비' : ''}</span></div><div class="a ${e.type}">${e.type === 'income' ? '+' : '-'}${e.amount.toLocaleString('ko-KR')}원</div></div>`).join('') +
+    (list.length > sqLimit ? `<button class="btn secondary" id="sqMore" style="width:100%;">더 보기 (${list.length - sqLimit}건 남음)</button>` : '') + `</div>`;
+  body.innerHTML = h1;
+}
+$('btnSearch').addEventListener('click', ()=>{ sqLimit = 50; $('searchOverlay').classList.add('show'); renderSearch(); try { $('sqText').focus(); } catch(e){} });
+$('sqText').addEventListener('input', ()=>{ sqLimit = 50; renderSearch(); });
+$('sqType').addEventListener('click', (e)=>{ const c = e.target.closest('.chip'); if(!c) return; sqType = c.getAttribute('data-k'); sqLimit = 50; renderSearch(); });
+$('sqPeriod').addEventListener('click', (e)=>{ const c = e.target.closest('.chip'); if(!c) return; sqPeriod = c.getAttribute('data-k'); sqLimit = 50; renderSearch(); });
+$('sqBody').addEventListener('click', (e)=>{
+  if(e.target.closest('#sqMore')){ sqLimit += 50; renderSearch(); return; }
+  const row = e.target.closest('.sq-row'); if(!row) return;
+  $('searchOverlay').classList.remove('show');
+  openEdit(row.getAttribute('data-id'));
+});
+$('sqClose').addEventListener('click', ()=> $('searchOverlay').classList.remove('show'));
+$('searchOverlay').addEventListener('click', (e)=>{ if(e.target.id==='searchOverlay') $('searchOverlay').classList.remove('show'); });
 
 $('btnBulkEdit').addEventListener('click', ()=>{
   bulkMatches = [];

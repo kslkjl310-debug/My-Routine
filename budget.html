@@ -324,6 +324,10 @@
   .preview-row .pinfo{flex:1;min-width:0;}
   .preview-row .pmemo{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   .preview-row .pdate{font-size:11px;color:var(--muted);}
+  .preview-row.fixed{box-shadow:inset 3px 0 0 var(--recurring);}
+  .preview-row .pfix{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;color:var(--recurring);margin-top:3px;cursor:pointer;}
+  .preview-row .pfix input[type=checkbox]{width:14px;height:14px;}
+  .preview-row .pnote{font-size:11px;font-weight:600;color:var(--recurring);margin-top:3px;}
   .preview-row .pamt{font-size:13.5px;font-weight:700;color:var(--expense);flex-shrink:0;font-variant-numeric:tabular-nums;}
   .preview-row select{
     font-size:12px;border:1px solid var(--paper-line);border-radius:8px;padding:5px 6px;
@@ -1242,13 +1246,26 @@ function renderUploadCardChips(){
   });
 }
 
+// 이름(공백 무시)과 금액이 같은 고정비가 이미 있으면 같은 고정비로 본다
+function normMerchant(s){ return String(s || '').replace(/\s+/g, '').toLowerCase(); }
+function findRecurMatch(r){
+  const n = normMerchant(r.merchant);
+  if(!n) return null;
+  return (data.recurring || []).find(x => x.type === 'expense' && x.amount === r.amount && normMerchant(x.name) === n) || null;
+}
+function recurDoneIn(rec, mk){ return rec.lastApplied === mk || (data.entries || []).some(e => e.recurringId === rec.id && e.date && e.date.slice(0, 7) === mk); }
+
 function renderPreview(){
+  parsedRows.forEach(r => {
+    if(r._init) return;
+    r._init = true; r.fixed = false; r.match = findRecurMatch(r); // 고정비는 자동으로 고르지 않는다. 같은 고정비가 있다는 안내만 한다
+  });
   $('uploadCleanupSection').style.display = 'none';
   $('uploadStep1').style.display = 'none';
   $('uploadStep2').style.display = 'block';
   $('uploadConfirm').style.display = 'block';
   const includedCount = () => parsedRows.filter(r=>r.include).length;
-  let summary = `${parsedRows.length}건을 찾았어요. 추가할 내역을 선택하고 카테고리를 확인해주세요.`;
+  let summary = `${parsedRows.length}건을 찾았어요. 추가할 내역을 선택하고 카테고리를 확인해주세요. 고정비는 자동으로 고르지 않아요. 매월 나가는 내역만 "🔁 고정비로 등록"을 직접 체크하면, 이번 달 내역부터 고정비로 표시되고 다음 달부터 매월 자동으로 들어와요.`;
   if(lastUploadCancelledCount > 0){
     summary += ` 취소 건 ${lastUploadCancelledCount}건은 제외했어요.`;
   }
@@ -1271,11 +1288,13 @@ function renderPreview(){
   renderUploadCardChips();
 
   $('previewTable').innerHTML = parsedRows.map((r, i) => `
-    <div class="preview-row">
+    <div class="preview-row${r.fixed ? ' fixed' : ''}">
       <input type="checkbox" data-i="${i}" class="prow-check" ${r.include?'checked':''}>
       <div class="pinfo">
         <div class="pmemo">${h(r.merchant || '내역')}</div>
         <div class="pdate">${r.date}</div>
+        <label class="pfix"><input type="checkbox" class="prow-fix" data-i="${i}" ${r.fixed?'checked':''}>🔁 ${r.match ? '등록된 고정비로 연결' : '고정비로 등록'}</label>
+        ${r.match ? `<div class="pnote">같은 이름·금액의 고정비가 이미 있어요${recurDoneIn(r.match, r.date.slice(0, 7)) ? ' · 그 달 고정비 내역이 이미 있어서 중복일 수 있어요' : ' · 체크하면 그 고정비에 연결돼서 이번 달에 중복으로 들어오지 않아요'}</div>` : ''}
       </div>
       <select data-i="${i}" class="prow-cat">
         ${expCatNames().map(c=>`<option value="${c}" ${c===r.category?'selected':''}>${c}</option>`).join('')}
@@ -1286,6 +1305,14 @@ function renderPreview(){
 
   $('previewTable').querySelectorAll('.prow-check').forEach(el=>{
     el.addEventListener('change', ()=>{ parsedRows[+el.getAttribute('data-i')].include = el.checked; });
+  });
+  $('previewTable').querySelectorAll('.prow-fix').forEach(el=>{
+    el.addEventListener('change', ()=>{
+      const r = parsedRows[+el.getAttribute('data-i')], row = el.closest('.preview-row');
+      r.fixed = el.checked;
+      if(el.checked){ r.include = true; row.querySelector('.prow-check').checked = true; } // 고정비로 등록하면 이 내역도 함께 추가
+      row.classList.toggle('fixed', el.checked);
+    });
   });
   $('previewTable').querySelectorAll('.prow-cat').forEach(el=>{
     el.addEventListener('change', ()=>{ parsedRows[+el.getAttribute('data-i')].category = el.value; });
@@ -1307,18 +1334,43 @@ function resetUploadSheet(){
 async function confirmUpload(){
   const chosen = parsedRows.filter(r => r.include);
   if(!chosen.length){ toast('추가할 내역을 선택해주세요'); return; }
+  data.recurring = data.recurring || [];
+  let newFixed = 0;
   chosen.forEach(r => {
-    data.entries.push({
-      id: genId(),
-      type: 'expense', amount: r.amount, date: r.date, category: r.category,
+    const mk = r.date.slice(0, 7);
+    let rec = null;
+    if(r.fixed){ // 내가 "고정비로 등록"을 체크한 내역만 고정비가 된다
+      rec = r.match;
+      if(!rec){
+        // 고정비 새로 등록: 이 내역이 그 달 몫이라서 lastApplied를 그 달로 두어, 같은 달에 한 번 더 들어가지 않게 한다. 다음 달부터 자동으로 들어간다.
+        rec = {
+          id: genId(), name: r.merchant || '고정비', amount: r.amount, day: parseInt(r.date.slice(8, 10), 10) || 1,
+          type: 'expense', category: r.category, payer: myName, active: true, lastApplied: mk,
+          method: 'card', cardName: uploadSelectedCard || null
+        };
+        data.recurring.push(rec);
+        newFixed++;
+      } else if(!rec.lastApplied || rec.lastApplied < mk){
+        rec.lastApplied = mk;
+      }
+    }
+    let id = genId();
+    if(rec){
+      const rid = `rec-${rec.id}-${mk}`;
+      if(!data.entries.some(e => e.id === rid)) id = rid;
+    }
+    const entry = {
+      id, type: 'expense', amount: r.amount, date: r.date, category: r.category,
       memo: r.merchant, payer: myName, method: 'card', cardName: uploadSelectedCard || null, source: 'statement-upload'
-    });
+    };
+    if(rec) entry.recurringId = rec.id; // 고정비로 표시된다
+    data.entries.push(entry);
   });
   await saveData();
   $('uploadOverlay').classList.remove('show');
   resetUploadSheet();
   render();
-  toast(`${chosen.length}건 추가했어요`);
+  toast(newFixed ? `${chosen.length}건 추가했어요 (고정비 ${newFixed}건 등록)` : `${chosen.length}건 추가했어요`);
 }
 
 function isUploadedEntry(e){

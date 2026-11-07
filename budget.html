@@ -343,6 +343,11 @@
   .sq-row .m span{display:block;font-size:11px;font-weight:400;color:var(--muted);}
   .sq-row .a{font-size:13.5px;font-weight:800;font-variant-numeric:tabular-nums;flex-shrink:0;}
   .sq-row .a.expense{color:var(--expense);} .sq-row .a.income{color:var(--income);}
+  .rp-btn{display:inline-block;margin-left:4px;border:1px solid var(--paper-line);background:#fff;color:var(--ink-soft);border-radius:999px;padding:1px 8px;font-size:11px;font-weight:700;cursor:pointer;}
+  .rp-btn.warn{border-color:var(--expense);color:var(--expense);}
+  .recur-pay-panel{background:var(--card);border-radius:10px;padding:10px 12px;margin:-2px 0 8px;box-shadow:var(--shadow);}
+  .recur-pay-panel .rp-chk{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;color:var(--ink-soft);cursor:pointer;}
+  .recur-pay-panel .rp-chk input{width:16px;height:16px;}
   .recur-sum{background:var(--recurring-bg);border-radius:14px;padding:12px 14px;margin:10px 0 12px;}
   .recur-sum .rs-main{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:13px;font-weight:700;color:var(--recurring);}
   .recur-sum .rs-main b{font-size:20px;font-weight:800;font-variant-numeric:tabular-nums;}
@@ -756,6 +761,14 @@ KB국민카드승인
     <div class="field">
       <label>카테고리</label>
       <div class="chips" id="rCategoryChips"></div>
+    </div>
+    <div class="field" id="rMethodField">
+      <label>결제수단</label>
+      <div class="seg">
+        <button id="rSegCash" type="button">💵 현금</button>
+        <button id="rSegCard" type="button">💳 카드</button>
+      </div>
+      <div id="rCardWrap" style="display:none;margin-top:8px;"><div class="chips" id="rCardChips"></div></div>
     </div>
     <div class="field">
       <label>작성자</label>
@@ -2636,10 +2649,18 @@ function renderRecurSummary(){
     if(e.date.slice(0, 7) === mk) thisMonth += e.amount;
     if(e.date.slice(0, 4) === yk) thisYear += e.amount;
   });
+  // 결제수단별 매월 예상 합계 (현금 / 카드별)
+  const byPay = {};
+  exp.forEach(r => {
+    const k = r.method === 'cash' ? '💵 현금' : r.method === 'card' ? '💳 ' + (r.cardName || '카드(미지정)') : '결제수단 미지정';
+    byPay[k] = (byPay[k] || 0) + (r.variable ? (r.lastAmount || r.amount || 0) : r.amount);
+  });
+  const payLine = Object.entries(byPay).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${h(k)} ${won(v)}`).join(' · ');
   const approx = vars.length ? '약 ' : '';
   box.innerHTML = `<div class="recur-sum">
     <div class="rs-main"><span>매월 지출 고정비</span><b>${approx}${won(monthTotal)}</b></div>
     <div class="rs-sub">금액 고정 ${won(fixedExp)}${vars.length ? ` + 변동 ${vars.length}건 ${varKnown.length ? '약 ' + won(varExp) + '(지난번·예상 금액 기준)' : '(금액 미정)'}${varUnknown && varKnown.length ? ` · 금액을 모르는 ${varUnknown}건 제외` : ''}` : ''} · 연 환산 약 ${won(monthTotal * 12)}</div>
+    ${payLine ? `<div class="rs-sub">결제수단별(매월 예상): ${payLine}</div>` : ''}
     <div class="rs-grid">
       <div><span>이번 달 고정비 (실제)</span><b>${won(thisMonth)}</b></div>
       <div><span>${yk}년 누계 (실제)</span><b>${won(thisYear)}</b></div>
@@ -2648,6 +2669,55 @@ function renderRecurSummary(){
     <div class="rs-sub" style="margin-top:6px;">꺼 둔 항목은 합계에서 빠져요. 실제 금액은 고정비로 표시된 내역을 더한 값이에요.</div>
   </div>`;
 }
+
+// ---- 고정비 결제수단: 현금 / 등록된 카드 ----
+let recurMethod = null, recurCard = null, editPayId = null;
+function recurPayLabel(r){
+  if(r.method === 'cash') return '💵 현금';
+  if(r.method === 'card') return '💳 ' + (r.cardName || '카드(미지정)');
+  return '결제수단 미지정';
+}
+function recurPayPanel(r){
+  const cards = (data.cards || []).map(c => c.name);
+  const chip = (m, c, label) => `<div class="chip ${(r.method === m && (m === 'cash' || (r.cardName || '') === c)) ? 'on' : ''}" data-id="${r.id}" data-m="${m}" data-c="${h(c || '')}">${label}</div>`;
+  const past = (data.entries || []).filter(e => e.recurringId === r.id).length;
+  return `<div class="recur-pay-panel"><div class="chips">${chip('cash', '', '💵 현금')}${cards.map(n => chip('card', n, '💳 ' + h(n))).join('')}</div>
+    ${cards.length ? '' : '<div class="empty-cat" style="padding:6px 0 0;">등록된 카드가 없어요. 💳 카드 관리에서 먼저 추가해주세요</div>'}
+    ${past ? `<label class="rp-chk"><input type="checkbox" class="rp-past" checked> 지난 내역 ${past}건도 같은 결제수단으로 바꾸기</label>` : ''}</div>`;
+}
+function renderRecurMethodUI(){
+  const exp = recurType === 'expense';
+  $('rMethodField').style.display = exp ? 'block' : 'none';
+  if(!exp) return;
+  $('rSegCash').classList.toggle('on', recurMethod === 'cash');
+  $('rSegCard').classList.toggle('on', recurMethod === 'card');
+  $('rCardWrap').style.display = recurMethod === 'card' ? 'block' : 'none';
+  if(recurMethod !== 'card') return;
+  const names = (data.cards || []).map(c => c.name);
+  if(!names.length){ $('rCardChips').innerHTML = `<div class="empty-cat" style="padding:4px 0;">등록된 카드가 없어요. 💳 카드 관리에서 먼저 추가해주세요</div>`; recurCard = null; return; }
+  if(!recurCard || !names.includes(recurCard)) recurCard = names[0];
+  $('rCardChips').innerHTML = names.map(n => `<div class="chip ${n === recurCard ? 'on' : ''}" data-c="${h(n)}">${h(n)}</div>`).join('');
+}
+$('rSegCash').addEventListener('click', ()=>{ recurMethod = 'cash'; recurCard = null; renderRecurMethodUI(); });
+$('rSegCard').addEventListener('click', ()=>{ recurMethod = 'card'; renderRecurMethodUI(); });
+$('rCardChips').addEventListener('click', (e)=>{ const c = e.target.closest('.chip'); if(!c) return; recurCard = c.getAttribute('data-c'); renderRecurMethodUI(); });
+$('recurList').addEventListener('click', async (e)=>{
+  const btn = e.target.closest('.rp-btn');
+  if(btn){ const id = btn.getAttribute('data-id'); editPayId = editPayId === id ? null : id; renderRecurList(); return; }
+  const chip = e.target.closest('.recur-pay-panel .chip');
+  if(!chip) return;
+  const r = (data.recurring || []).find(x => x.id === chip.getAttribute('data-id')); if(!r) return;
+  const m = chip.getAttribute('data-m'), c = chip.getAttribute('data-c') || null;
+  const past = !!(chip.closest('.recur-pay-panel').querySelector('.rp-past') || {}).checked;
+  r.method = m; r.cardName = m === 'card' ? c : null; // 앞으로 자동으로 들어가는 내역에 적용된다
+  let changed = 0;
+  if(past){ data.entries.forEach(en => { if(en.recurringId === r.id && en.type === 'expense'){ en.method = r.method; en.cardName = r.cardName; changed++; } }); }
+  editPayId = null;
+  await saveData();
+  renderRecurList();
+  render();
+  toast(changed ? `${r.name}: ${recurPayLabel(r)}로 바꿨어요 (지난 내역 ${changed}건 포함)` : `${r.name}: ${recurPayLabel(r)}로 바꿨어요`);
+});
 
 function renderRecurList(){
   renderRecurSummary();
@@ -2661,11 +2731,11 @@ function renderRecurList(){
       <label class="switch"><input type="checkbox" class="recur-active" data-id="${r.id}" ${r.active?'checked':''}><span class="slider"></span></label>
       <div class="mid">
         <div class="name">${h(r.name)}</div>
-        <div class="meta">매월 ${r.day}일 · ${r.category}${r.variable ? ` · 변동 (${r.lastAmount ? '지난번 ' + won(r.lastAmount) : (r.amount ? '예상 ' + won(r.amount) : '금액 미정')})` : ''}${st.n ? ` · 누적 ${won(st.sum)} (${st.n}회)` : ''}</div>
+        <div class="meta">매월 ${r.day}일 · ${r.category}${r.variable ? ` · 변동 (${r.lastAmount ? '지난번 ' + won(r.lastAmount) : (r.amount ? '예상 ' + won(r.amount) : '금액 미정')})` : ''}${st.n ? ` · 누적 ${won(st.sum)} (${st.n}회)` : ''}${r.type === 'expense' ? ` <button class="rp-btn${r.method ? '' : ' warn'}" type="button" data-id="${r.id}">${recurPayLabel(r)} ✎</button>` : ''}</div>
       </div>
       <div class="amt">${r.variable ? '<span style="font-size:12px;">변동</span>' : r.amount.toLocaleString('ko-KR') + '원'}</div>
       <button class="del" data-id="${r.id}">✕</button>
-    </div>
+    </div>${editPayId === r.id ? recurPayPanel(r) : ''}
   `; }).join('');
   list.querySelectorAll('.recur-active').forEach(el => {
     el.addEventListener('change', async () => {
@@ -2688,6 +2758,7 @@ function openRecurManage(){
   $('rSegExpense').classList.add('on'); $('rSegIncome').classList.remove('on');
   $('rName').value = ''; $('rAmount').value = ''; $('rDay').value = 1; $('rPayer').value = myName;
   $('rVariable').checked = false; syncRecurVariable();
+  recurMethod = null; recurCard = null; editPayId = null; renderRecurMethodUI();
   renderRecurCategoryChips();
   renderRecurList();
   $('recurOverlay').classList.add('show');
@@ -2700,14 +2771,20 @@ async function saveRecurring(){
   const variable = $('rVariable').checked;
   if(!name){ toast('이름을 입력해주세요'); return; }
   if(!variable && (!amount || amount <= 0)){ toast('금액을 입력해주세요'); return; }
+  if(recurType === 'expense'){ // 지출 고정비는 현금인지 카드인지 꼭 정한다
+    if(!recurMethod){ toast('결제수단(현금/카드)을 선택해주세요'); return; }
+    if(recurMethod === 'card' && !recurCard){ toast('카드를 선택해주세요. 카드가 없으면 💳 카드 관리에서 먼저 추가해주세요'); return; }
+  }
   data.recurring = data.recurring || [];
   data.recurring.push({
     id: genId(), name, amount: amount > 0 ? amount : 0, day, type: recurType, category: recurCategory,
     payer: $('rPayer').value.trim() || myName, active: true, lastApplied: null,
-    variable, lastAmount: variable && amount > 0 ? amount : null
+    variable, lastAmount: variable && amount > 0 ? amount : null,
+    method: recurType === 'expense' ? recurMethod : null, cardName: recurType === 'expense' && recurMethod === 'card' ? recurCard : null
   });
   await saveData();
   $('rName').value = ''; $('rAmount').value = ''; $('rDay').value = 1; $('rVariable').checked = false; syncRecurVariable();
+  recurMethod = null; recurCard = null; renderRecurMethodUI();
   renderRecurList();
   render();
   toast(variable ? '변동 고정비를 추가했어요' : '고정비를 추가했어요');
@@ -3077,6 +3154,8 @@ $('btnRecurManage').addEventListener('click', openRecurManage);
 $('rSegExpense').addEventListener('click', ()=>{ recurType='expense'; $('rSegExpense').classList.add('on'); $('rSegIncome').classList.remove('on'); renderRecurCategoryChips(); });
 $('rSegIncome').addEventListener('click', ()=>{ recurType='income'; $('rSegIncome').classList.add('on'); $('rSegExpense').classList.remove('on'); renderRecurCategoryChips(); });
 $('rSave').addEventListener('click', saveRecurring);
+$('rSegExpense').addEventListener('click', renderRecurMethodUI); // recurType이 바뀐 뒤(위의 기존 핸들러 다음)에 결제수단 칸을 맞춘다
+$('rSegIncome').addEventListener('click', renderRecurMethodUI);
 $('recurClose').addEventListener('click', ()=> $('recurOverlay').classList.remove('show'));
 $('recurOverlay').addEventListener('click', (e)=>{ if(e.target.id==='recurOverlay') $('recurOverlay').classList.remove('show'); });
 

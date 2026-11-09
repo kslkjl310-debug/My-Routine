@@ -343,6 +343,20 @@
   .sq-row .m span{display:block;font-size:11px;font-weight:400;color:var(--muted);}
   .sq-row .a{font-size:13.5px;font-weight:800;font-variant-numeric:tabular-nums;flex-shrink:0;}
   .sq-row .a.expense{color:var(--expense);} .sq-row .a.income{color:var(--income);}
+  .ins-badge{display:inline-block;font-size:10.5px;font-weight:700;background:var(--installment-bg);color:var(--installment);border-radius:6px;padding:1px 6px;margin-left:6px;vertical-align:1px;}
+  .ins-badge.rec{background:var(--recurring-bg);color:var(--recurring);}
+  .sq-row .m span.ins-badge{display:inline-block;font-size:10.5px;font-weight:700;color:var(--installment);margin-left:6px;}
+  .sq-row .m span.ins-badge.rec{color:var(--recurring);}
+  .stmt-detail{margin:6px 0 4px;}
+  .stmt-ent.sched{opacity:.65;}
+  .stmt-card{padding:8px 0 4px;border-top:1px dashed var(--paper-line);}
+  .stmt-card:first-child{border-top:none;padding-top:0;}
+  .stmt-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:13px;font-weight:800;color:var(--ink);margin-bottom:2px;}
+  .stmt-head span{font-size:11px;font-weight:500;color:var(--muted);}
+  .stmt-card .cat-row .name{width:92px;}
+  .stmt-card .cat-row.next .bar-fg{background:#C9CBD2;}
+  .stmt-tag{display:inline-block;font-size:10.5px;font-weight:700;border-radius:6px;padding:1px 6px;margin-right:6px;background:#EEEEF0;color:var(--ink-soft);}
+  .stmt-tag.live{background:var(--expense-bg);color:var(--expense);}
   .rp-btn{display:inline-block;margin-left:4px;border:1px solid var(--paper-line);background:#fff;color:var(--ink-soft);border-radius:999px;padding:1px 8px;font-size:11px;font-weight:700;cursor:pointer;}
   .rp-btn.warn{border-color:var(--expense);color:var(--expense);}
   .recur-pay-panel{background:var(--card);border-radius:10px;padding:10px 12px;margin:-2px 0 8px;box-shadow:var(--shadow);}
@@ -547,6 +561,11 @@
 
   <div class="section-title">현금&카드별 지출</div>
   <div class="chips" id="methodFilterChips" style="margin-bottom:10px;"></div>
+  <div class="seg" id="cardViewSeg" style="margin-bottom:6px;">
+    <button id="cvMonth" type="button" class="on">📅 월별 사용 기준</button>
+    <button id="cvStmt" type="button">🧾 명세서 기준</button>
+  </div>
+  <div class="paymethod-meta" id="cardViewHint" style="margin:0 2px 10px;"></div>
   <div class="cat-card" id="cardSummaryCard"></div>
 
   <div class="section-title">통장 잔액</div>
@@ -1879,7 +1898,14 @@ function render(){
     .filter(([name]) => activeKeys.has(name))
     .sort((a,b) => b[1]-a[1]);
 
-  if(filteredEntries.length === 0){
+  $('cvMonth').classList.toggle('on', cardViewMode !== 'stmt');
+  $('cvStmt').classList.toggle('on', cardViewMode === 'stmt');
+  $('cardViewHint').textContent = cardViewMode === 'stmt'
+    ? '카드 관리에 등록한 결제일·이용기간 기준이에요. 금액은 실제 사용에 아직 안 들어온 할부·고정비(예정)를 더한 예상 금액이에요. 누르면 내역이 펼쳐져요. 현금은 명세서가 없어서 그 달 1일~말일 기준이에요.'
+    : '내역 날짜가 속한 달 기준이에요. 누르면 그 달 내역이 펼쳐져요. (명세서 기준은 위 버튼으로 바꿔요)';
+  if(cardViewMode === 'stmt'){
+    renderStatementView(cardCard, byMethod, activeKeys);
+  } else if(filteredEntries.length === 0){
     cardCard.innerHTML = `<div class="empty-cat">해당 조건의 지출 내역이 없어요</div>`;
   } else {
     const cardMax = filteredEntries[0][1];
@@ -1897,13 +1923,17 @@ function render(){
       const metaLine = cardObj && !cycleInfo
         ? `<div class="paymethod-meta">결제일/이용기간 미설정 · 💳 카드 관리에서 등록</div>`
         : (cycleInfo ? `<div class="paymethod-meta">${cycleInfo}</div>` : '');
+      const open = monthOpen.has(name);
       return `
-      <div class="cat-row" style="${metaLine ? 'margin-bottom:0;' : ''}">
-        <div class="name">${name}</div>
+      <div class="stmt-card" data-stmt="${h(name)}">
+      <div class="cat-row stmt-toggle" style="cursor:pointer;${metaLine || open ? 'margin-bottom:0;' : ''}">
+        <div class="name" style="width:92px;">${h(name)} ${open ? '▾' : '▸'}</div>
         <div class="bar-bg"><div class="bar-fg" style="width:${Math.max(6, Math.round(amt/cardMax*100))}%"></div></div>
         <div class="amt">${amt.toLocaleString('ko-KR')}</div>
       </div>
       ${metaLine}
+      ${open ? monthDetailHtml(name) : ''}
+      </div>
     `;
     }).join('') + totalRow;
   }
@@ -2296,6 +2326,180 @@ async function addSubCat(){
   renderCatManage();
   toast('하위 카테고리를 추가했어요');
 }
+
+// ---- 카드 명세서 기준 보기 ----
+// 카드 관리의 결제일·이용기간으로 "그 달에 결제되는 명세서"의 이용기간과 금액을 계산한다.
+let cardViewMode = 'month';
+try { if(localStorage.getItem('budget-card-view') === 'stmt') cardViewMode = 'stmt'; } catch(e){}
+function setCardView(mode){
+  cardViewMode = mode;
+  try { localStorage.setItem('budget-card-view', mode); } catch(e){}
+  render();
+}
+$('cvMonth').addEventListener('click', ()=> setCardView('month'));
+$('cvStmt').addEventListener('click', ()=> setCardView('stmt'));
+const ymdStr = (y, m, d) => `${y}-${pad(m + 1)}-${pad(d)}`;
+function shiftMonthIdx(y, m, off){ const d = new Date(y, m + off, 1); return [d.getFullYear(), d.getMonth()]; }
+// 결제월(y년 m월, m은 0부터)에 결제되는 명세서의 이용기간·결제일
+function cardStatementPeriod(card, y, m){
+  if(!card || !card.cycleStartDay || !card.cycleEndDay) return null;
+  const so = card.cycleStartOffset == null ? -1 : card.cycleStartOffset, eo = card.cycleEndOffset == null ? 0 : card.cycleEndOffset;
+  const [sy, sm] = shiftMonthIdx(y, m, so), [ey, em] = shiftMonthIdx(y, m, eo);
+  return {
+    start: ymdStr(sy, sm, Math.min(card.cycleStartDay, daysInMonth(sy, sm))),
+    end: ymdStr(ey, em, Math.min(card.cycleEndDay, daysInMonth(ey, em))),
+    pay: card.payDay ? ymdStr(y, m, Math.min(card.payDay, daysInMonth(y, m))) : null
+  };
+}
+function cardStatementTotal(cardName, p){
+  let sum = 0, n = 0;
+  (data.entries || []).forEach(e => {
+    if(e.type === 'expense' && e.method === 'card' && e.cardName === cardName && e.date >= p.start && e.date <= p.end){ sum += e.amount; n++; }
+  });
+  return { sum, n };
+}
+const shortDate = (s) => `${s.slice(5, 7)}/${s.slice(8, 10)}`;
+// 아직 내역으로 만들어지지 않은 할부 회차 중, 그 명세서의 이용기간에 날짜가 들어오는 것을 미리 더한다
+function scheduledInstallments(cardName, p){
+  let sum = 0, n = 0;
+  (data.installments || []).forEach(plan => {
+    if(plan.cancelled || plan.cardName !== cardName) return;
+    const applied = plan.appliedSeqs || [];
+    for(let seq = 1; seq <= plan.months; seq++){
+      if(applied.includes(seq)) continue;
+      const date = seqToDate(plan.startYearMonth, seq, plan.day);
+      if(date >= p.start && date <= p.end){ sum += computeInstallmentAmount(plan.totalAmount, plan.months, seq); n++; }
+    }
+  });
+  return { sum, n };
+}
+// 아직 내역으로 만들어지지 않은 "카드 고정비"가 그 명세서의 이용기간에 들어오는 만큼을 미리 더한다.
+// 금액이 고정된 고정비는 정해 둔 금액, 변동 고정비는 지난번(없으면 예상) 금액으로 계산하고, 금액을 모르는 변동 고정비는 건수만 센다.
+function scheduledRecurring(cardName, p){ // cardName이 '현금'이면 현금 고정비
+  const items = [], today = todayStr(), curMk = monthKey(new Date());
+  const [sy, sm] = p.start.split('-').map(Number), [ey, em] = p.end.split('-').map(Number);
+  const months = monthsBetween(`${sy}-${pad(sm)}`, `${ey}-${pad(em)}`);
+  (data.recurring || []).forEach(r => {
+    if(!r.active || r.type !== 'expense') return;
+    if(cardName === '현금' ? r.method !== 'cash' : (r.method !== 'card' || r.cardName !== cardName)) return;
+    for(let i = 0; i <= months; i++){
+      const [oy, om] = shiftMonthIdx(sy, sm - 1, i), mk = `${oy}-${pad(om + 1)}`;
+      const date = ymdStr(oy, om, Math.min(r.day || 1, daysInMonth(oy, om)));
+      if(date < p.start || date > p.end) continue;
+      if(mk < curMk) continue;           // 지난 달인데 내역이 없는 건 예정이 아니다
+      if(recurDoneIn(r, mk)) continue;   // 이미 내역으로 들어갔다
+      const amt = r.variable ? (r.lastAmount || r.amount || 0) : r.amount;
+      items.push({ date, name: r.name, amt, variable: !!r.variable, unknown: !amt, cat: r.category || '' });
+    }
+  });
+  return { sum: items.reduce((s, x) => s + x.amt, 0), n: items.length, unknown: items.filter(x => x.unknown).length, items };
+}
+// 그 명세서(카드 + 이용기간)에 들어가는 내역 목록. 할부는 "할부 2/6"처럼 회차를 붙인다.
+function stmtDetailHtml(name, per){
+  const rows = [], isCash = name === '현금';
+  (data.entries || []).forEach(e => {
+    if(e.type === 'expense' && (isCash ? e.method === 'cash' : (e.method === 'card' && e.cardName === name)) && e.date >= per.start && e.date <= per.end){
+      rows.push({ id: e.id, date: e.date, memo: (e.memo || '').replace(/\s*\(할부\s*\d+\/\d+\)\s*$/, '') || '(메모 없음)', cat: e.category || '', amt: e.amount,
+        ins: e.installmentId ? { seq: e.installmentSeq, months: e.installmentMonths } : null, rec: !!e.recurringId });
+    }
+  });
+  (isCash ? [] : (data.installments || [])).forEach(plan => { // 아직 내역이 안 생긴 회차는 "예정"으로 같이 보여 준다
+    if(plan.cancelled || plan.cardName !== name) return;
+    const applied = plan.appliedSeqs || [];
+    for(let seq = 1; seq <= plan.months; seq++){
+      if(applied.includes(seq)) continue;
+      const date = seqToDate(plan.startYearMonth, seq, plan.day);
+      if(date >= per.start && date <= per.end) rows.push({ id: null, date, memo: plan.name, cat: plan.category || '', amt: computeInstallmentAmount(plan.totalAmount, plan.months, seq), ins: { seq, months: plan.months }, sched: true });
+    }
+  });
+  scheduledRecurring(name, per).items.forEach(x => { // 아직 안 들어온 카드 고정비
+    rows.push({ id: null, date: x.date, memo: x.name, cat: x.cat, amt: x.amt, rec: true, sched: true, unk: x.unknown, note: x.unknown ? '합계에서 제외' : (x.variable ? '변동 · 지난번 금액 기준' : '') });
+  });
+  return detailRowsHtml(rows, '이 명세서에 들어가는 내역이 없어요');
+}
+// 월별 사용 기준: 그 달(달력 기준)에 실제로 쓴 내역만 보여 준다(예정은 넣지 않는다)
+let monthOpen = new Set();
+function monthDetailHtml(key){
+  const mk = monthKey(cur), rows = [];
+  (data.entries || []).forEach(e => {
+    if(e.type !== 'expense' || !e.method || e.date.slice(0, 7) !== mk) return;
+    if((e.method === 'cash' ? '현금' : (e.cardName || '카드(미지정)')) !== key) return;
+    rows.push({ id: e.id, date: e.date, memo: (e.memo || '').replace(/\s*\(할부\s*\d+\/\d+\)\s*$/, '') || '(메모 없음)', cat: e.category || '', amt: e.amount,
+      ins: e.installmentId ? { seq: e.installmentSeq, months: e.installmentMonths } : null, rec: !!e.recurringId });
+  });
+  return detailRowsHtml(rows, '이 달에 쓴 내역이 없어요');
+}
+function detailRowsHtml(rows, emptyMsg){
+  if(!rows.length) return `<div class="stmt-detail"><div class="empty-cat" style="padding:8px 0;">${emptyMsg}</div></div>`;
+  rows.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+  return `<div class="stmt-detail">` + rows.map(r => {
+    const badge = r.ins ? `<span class="ins-badge">할부 ${r.ins.seq}/${r.ins.months}</span>` : (r.rec ? `<span class="ins-badge rec">고정비</span>` : '');
+    const sub = r.ins ? `${r.ins.months}개월 중 ${r.ins.seq}회차${r.ins.months - r.ins.seq > 0 ? ' · 남은 ' + (r.ins.months - r.ins.seq) + '회' : ' · 마지막 회차'}${r.sched ? ' · 예정' : ''}` : (r.sched ? '예정' + (r.cat ? ' · ' + h(r.cat) : '') + (r.note ? ' · ' + r.note : '') : h(r.cat));
+    return `<div class="sq-row stmt-ent${r.sched ? ' sched' : ''}" ${r.id ? `data-id="${h(r.id)}"` : ''}><div class="d">${shortDate(r.date)}</div><div class="m">${h(r.memo)}${badge}<span>${sub}</span></div><div class="a expense">${r.unk ? '금액 미정' : '-' + r.amt.toLocaleString('ko-KR') + '원'}</div></div>`;
+  }).join('') + `</div>`;
+}
+let stmtOpen = new Set(); // 내역을 펼쳐 둔 카드
+function renderStatementView(box, byMethod, activeKeys){
+  const today = todayStr(), y = cur.getFullYear(), m = cur.getMonth();
+  const cards = [...activeKeys].filter(k => k !== '현금' && k !== '카드(미지정)');
+  const rows = [];
+  cards.forEach(name => {
+    const card = (data.cards || []).find(c => c.name === name), per = cardStatementPeriod(card, y, m);
+    if(!per){ rows.push({ name, card, per: null, monthly: byMethod[name] || 0 }); return; }
+    const a = cardStatementTotal(name, per), s = scheduledInstallments(name, per), rc = scheduledRecurring(name, per);
+    rows.push({ name, card, per, a, s, rc, total: a.sum + s.sum + rc.sum });
+  });
+  const max = Math.max(1, byMethod['현금'] || 0, ...rows.map(r => r.per ? r.total : r.monthly));
+  const status = (p) => p.end < today ? '' : (p.start <= today ? '<span class="stmt-tag live">이용 중</span>' : '<span class="stmt-tag">예정</span>');
+  const bar = (v, extra) => `<div class="bar-bg"><div class="bar-fg" style="width:${Math.min(100, Math.max(v ? 6 : 0, Math.round(v / max * 100)))}%;${extra || ''}"></div></div>`;
+  const blocks = [];
+  let stmtTotal = 0, stmtAny = false, cashTotal = null;
+  rows.forEach(r => {
+    if(!r.per){
+      blocks.push(`<div class="stmt-card"><div class="stmt-head">💳 ${h(r.name)}</div>
+        <div class="cat-row"><div class="name">${m + 1}월 사용</div>${bar(r.monthly)}<div class="amt">${r.monthly.toLocaleString('ko-KR')}</div></div>
+        <div class="paymethod-meta">결제일/이용기간이 없어서 월별로 보여요 · 💳 카드 관리에서 등록하면 명세서 기준으로 볼 수 있어요</div></div>`);
+      return;
+    }
+    stmtAny = true; stmtTotal += r.total;
+    const open = stmtOpen.has(r.name);
+    const sched = (r.s.n ? ` · <span style="color:var(--installment);font-weight:700;">예정 할부 ${r.s.n}건 +${r.s.sum.toLocaleString('ko-KR')}</span>` : '') +
+      (r.rc.n ? ` · <span style="color:var(--recurring);font-weight:700;">예정 고정비 ${r.rc.n}건 +${r.rc.sum.toLocaleString('ko-KR')}${r.rc.unknown ? ' (금액 미정 ' + r.rc.unknown + '건 제외)' : ''}</span>` : '');
+    blocks.push(`<div class="stmt-card" data-stmt="${h(r.name)}"><div class="stmt-head">💳 ${h(r.name)}<span>${r.card.payDay ? '결제일 매월 ' + r.card.payDay + '일' : ''}</span></div>
+      <div class="cat-row stmt-toggle" style="margin-bottom:0;cursor:pointer;"><div class="name">${m + 1}월 명세서 ${open ? '▾' : '▸'}</div>${bar(r.total)}<div class="amt">${r.total.toLocaleString('ko-KR')}</div></div>
+      <div class="paymethod-meta">${status(r.per)}이용기간 ${shortDate(r.per.start)}~${shortDate(r.per.end)}${r.per.pay ? ' · 결제일 ' + shortDate(r.per.pay) : ''} · ${r.a.n}건${sched} · 눌러서 내역 ${open ? '접기' : '보기'}</div>
+      ${open ? stmtDetailHtml(r.name, r.per) : ''}</div>`);
+  });
+  if(activeKeys.has('카드(미지정)')){
+    const v = byMethod['카드(미지정)'] || 0;
+    blocks.push(`<div class="stmt-card"><div class="stmt-head">💳 카드(미지정)</div><div class="cat-row"><div class="name">${m + 1}월 사용</div>${bar(v)}<div class="amt">${v.toLocaleString('ko-KR')}</div></div><div class="paymethod-meta">카드를 지정하지 않은 내역이라 월별로 보여요</div></div>`);
+  }
+  if(activeKeys.has('현금')){
+    // 현금은 명세서가 없어서 그 달(달력 기준 1일~말일)로 계산한다. 아직 안 들어온 현금 고정비는 예정으로 더한다.
+    const per = { start: ymdStr(y, m, 1), end: ymdStr(y, m, daysInMonth(y, m)) };
+    let cashActual = 0, cashN = 0;
+    (data.entries || []).forEach(e => { if(e.type === 'expense' && e.method === 'cash' && e.date >= per.start && e.date <= per.end){ cashActual += e.amount; cashN++; } });
+    const rc = scheduledRecurring('현금', per), total = cashActual + rc.sum, open = stmtOpen.has('현금');
+    const sched = rc.n ? ` · <span style="color:var(--recurring);font-weight:700;">예정 고정비 ${rc.n}건 +${rc.sum.toLocaleString('ko-KR')}${rc.unknown ? ' (금액 미정 ' + rc.unknown + '건 제외)' : ''}</span>` : '';
+    cashTotal = total;
+    blocks.push(`<div class="stmt-card" data-stmt="현금"><div class="stmt-head">💵 현금<span>월 기준(1일~말일)</span></div>
+      <div class="cat-row stmt-toggle" style="margin-bottom:0;cursor:pointer;"><div class="name">${m + 1}월 현금 ${open ? '▾' : '▸'}</div>${bar(total, 'background:#7FB77E;')}<div class="amt">${total.toLocaleString('ko-KR')}</div></div>
+      <div class="paymethod-meta">${status(per)}${shortDate(per.start)}~${shortDate(per.end)} · ${cashN}건${sched} · 눌러서 내역 ${open ? '접기' : '보기'}</div>
+      ${open ? stmtDetailHtml('현금', per) : ''}</div>`);
+  }
+  if(!blocks.length){ box.innerHTML = `<div class="empty-cat">해당 조건의 지출 내역이 없어요</div>`; return; }
+  const foot = stmtAny ? `<div class="cat-row" style="border-top:1px dashed var(--paper-line);margin-top:6px;padding-top:10px;"><div class="name" style="width:auto;font-weight:700;color:var(--ink);">${m + 1}월 명세서 합계(카드)</div><div style="flex:1"></div><div class="amt" style="width:auto;font-weight:800;">${stmtTotal.toLocaleString('ko-KR')}</div></div>` : '';
+  box.innerHTML = blocks.join('') + foot;
+}
+$('cardSummaryCard').addEventListener('click', (e)=>{
+  const row = e.target.closest('.sq-row[data-id]');
+  if(row){ openEdit(row.getAttribute('data-id')); return; }
+  const tog = e.target.closest('.stmt-toggle'); if(!tog) return;
+  const name = tog.closest('.stmt-card').getAttribute('data-stmt');
+  const set = cardViewMode === 'stmt' ? stmtOpen : monthOpen; // 보기마다 따로 펼침 상태를 기억한다
+  if(set.has(name)) set.delete(name); else set.add(name);
+  render();
+});
 
 // ---- Cash & card spending filter ----
 function getMethodOptions(){

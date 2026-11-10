@@ -247,6 +247,7 @@
   .goalb .gb-d { flex: none; text-align: center; background: var(--card); border-radius: 14px; padding: 10px 14px; } .goalb .gb-d b { font-size: 28px; font-weight: 800; color: var(--accent); line-height: 1; white-space: nowrap; }
   .goalb.dday .gb-d { background: var(--accent); } .goalb.dday .gb-d b { color: var(--accent-ink); }
   .goalb.off { background: var(--card); border-color: var(--line); }
+  .ver { font-size: 11px; font-weight: 500; color: var(--ink2); margin-left: 6px; letter-spacing: 0; vertical-align: middle; }
   .dt-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 10px; padding: 2px 2px 0; } .dt-head small { display: block; font-size: 14px; color: var(--ink2); font-weight: 600; } .dt-head b { font-size: 36px; font-weight: 800; line-height: 1.1; } .dt-head b span { font-size: 22px; font-weight: 700; } .dt-date { font-size: 13px; color: var(--ink2); padding-bottom: 6px; text-align: right; }
   .dt-card { background: #141416; border-radius: 22px; padding: 18px 16px 16px; color: #fff; } .dt-ct { font-size: 17px; font-weight: 700; margin: 0 4px 14px; }
   .dt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -326,6 +327,7 @@
   @media (max-width: 420px) { .row2 { grid-template-columns: 1fr; } }
   @media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
 </style>
+<script src="version.js"></script>
 </head>
 <body>
 <div class="wrap" id="root"></div>
@@ -1770,7 +1772,7 @@
   function render() {
     var t = todayKey(), m = kmByDate(), ws = weekStart(t), g = weekGoal(ws).km, we = addDays(ws, 6);
     var wRuns = state.runs.filter(function (r) { return inRange(r, ws, we); }), wKm = r2(sum(wRuns, function (r) { return r.km; })), tKm = m[t] || 0;
-    var h = '<div class="head"><h1>러닝 관리</h1><div class="tools"><span class="saved" id="saved"></span>' +
+    var h = '<div class="head"><h1>러닝 관리' + (window.APP_VERSION ? ' <small class="ver" title="My Tools 버전">v' + window.APP_VERSION + '</small>' : '') + '</h1><div class="tools"><span class="saved" id="saved"></span>' +
       '<button type="button" class="btn sm" data-act="goal">목표 설정</button>' +
       '<button type="button" class="btn sm" data-act="export" id="exportBtn" hidden>내보내기</button>' +
       '<label class="btn sm">불러오기<input type="file" id="importFile" accept=".json,application/json" hidden></label></div></div>';
@@ -2131,7 +2133,7 @@
     else if (act === 'gweek') { sheet.perWeek = +t.dataset.n; document.querySelectorAll('[data-act=gweek]').forEach(function (c) { c.setAttribute('aria-pressed', String(+c.dataset.n === sheet.perWeek)); }); }
     else if (act === 'more') { showAll = true; render(); }
     else if (act === 'export') exportBackup();
-    else if (act === 'import-yes') { if (pendingImport) { var ts = state.updatedAt, ds = Object.keys(kmByDate()); state = pendingImport.data; state.updatedAt = Math.max(Date.now(), ts + 1); pendingImport = null; commit(ds.concat(Object.keys(kmByDate()))); toast('백업에서 복원했어요'); } }
+    else if (act === 'import-yes') { if (pendingImport) { var ts = state.updatedAt, ds = Object.keys(kmByDate()); state = pendingImport.data; state.updatedAt = Math.max(Date.now(), ts + 1); pendingImport = null; commit(ds.concat(Object.keys(kmByDate()))); var nsp = sum(state.runs, function (r) { return (r.splits || []).length; }), ncd = state.runs.filter(function (r) { return r.cadence; }).length; toast('백업에서 복원했어요. 러닝 ' + state.runs.length + '번 · 케이던스 ' + ncd + '번 · 구간기록 ' + nsp + '줄', 6000); } }
     else if (act === 'import-no') { pendingImport = null; render(); }
   });
   document.addEventListener('input', function (e) { if (/^rn-(km|min|sec)$/.test(e.target.id)) updatePace(); else if (e.target.id === 'gl-pace-in') updateGoalPace('pace'); else if (/^gl-(dist|h|m|s)$/.test(e.target.id)) updateGoalPace('time'); else if (/^pl-m-/.test(e.target.id)) updatePlanTotal(); });

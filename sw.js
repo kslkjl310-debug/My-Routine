@@ -1,8 +1,10 @@
 /* 오프라인에서도 열리도록 앱 파일을 보관한다.
    같은 주소의 파일은 "네트워크 먼저, 안 되면 보관본" 이다. 이때 브라우저가 몇 분간 들고 있는 예전 파일을 쓰지 않고
    매번 서버에 새 파일이 있는지 확인하므로(cache: 'no-cache'), 새로 올린 버전이 바로 반영된다. */
-const V = 'my-tools-v2';
-const CORE = ['./', 'index.html', 'backend.js', 'firebase-config.js', 'routine.html', 'bible.html', 'prayer.html', 'verse.html', 'reading.html', 'running.html','planner.html', 'opic.html', 'budget.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'splash.png'];
+// 버전이 바뀌면(version.js) 보관본 이름도 바뀌어서 새 파일을 새로 받는다. version.js가 없어도 설치는 멈추지 않는다.
+try { importScripts('version.js'); } catch (e) {}
+const V = 'my-tools-v' + (self.APP_VERSION || '2');
+const CORE = ['./', 'version.js', 'index.html', 'backend.js', 'firebase-config.js', 'routine.html', 'bible.html', 'prayer.html', 'verse.html', 'reading.html', 'running.html','planner.html', 'opic.html', 'budget.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'splash.png'];
 
 self.addEventListener('install', (e) => {
   // 아직 올리지 않은 파일이 있어도 설치가 멈추지 않게, 파일마다 따로 받아 둔다

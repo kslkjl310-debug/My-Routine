@@ -51,6 +51,7 @@
   .tool-item.active{background:var(--accent-soft);color:var(--accent-ink);}
   .tool-item .dot{width:5px;height:5px;border-radius:50%;background:#3a3b42;flex-shrink:0;}
   .tool-item.active .dot{background:var(--accent);}
+  .appver{font-size:11px;color:var(--muted);white-space:nowrap;}
   .panel-note{margin-top:auto;font-size:11px;line-height:1.55;color:var(--muted);padding:10px 8px 2px;border-top:1px solid var(--panel-border);}
 
   /* ---- main ---- */
@@ -171,6 +172,7 @@
       <div class="crumb"><span id="crumbCat">루틴</span> / <b id="crumbTool">오늘의 루틴</b></div>
       <div class="top-r">
         <button class="top-btn" id="installBtn" hidden>앱으로 설치</button>
+        <span class="appver" id="appVer" title="My Tools 버전"></span>
         <span class="conn" id="conn">확인 중…</span>
         <span class="who" id="who"></span>
         <button class="top-btn" id="logoutBtn" hidden>로그아웃</button>
@@ -195,6 +197,8 @@
   <div class="gate-card" id="gateCard"></div>
 </div>
 
+<script src="version.js"></script>
+<script>try { var av = document.getElementById('appVer'); if (av && window.APP_VERSION) av.textContent = 'v' + window.APP_VERSION; } catch (e) {}</script>
 <script src="firebase-config.js"></script>
 <script src="backend.js"></script>
 <script>

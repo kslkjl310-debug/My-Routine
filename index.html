@@ -403,8 +403,7 @@
   function showLogin(msg){
     gate(LOGO + '<h1>My Tools</h1><p>루틴, 신앙관리, 역량관리, 재정관리를 한곳에서. 로그인하면 폰과 PC가 같은 데이터를 써요.</p>' +
       '<button class="g-btn primary" id="gGoogle">Google로 로그인</button>' +
-      '<div class="g-err" id="gErr" role="alert">' + (msg || '') + '</div>' +
-      '<button class="g-link" id="gLocal">로그인 없이 이 기기에서만 쓰기</button>');
+      '<div class="g-err" id="gErr" role="alert">' + (msg || '') + '</div>');
     $('gGoogle').onclick = async () => {
       $('gErr').textContent = '';
       try { await Backend.signIn(); }
@@ -415,7 +414,6 @@
           : '로그인하지 못했어요. 잠시 뒤 다시 시도해 주세요. (' + (c || '오류') + ')';
       }
     };
-    $('gLocal').onclick = () => startLocal();
   }
   function showLoading(t){ gate(LOGO + '<p>' + t + '</p>'); }
 
@@ -445,8 +443,8 @@
       });
     } catch (e) {
       gate(LOGO + '<h1>My Tools</h1><p>로그인 도구를 불러오지 못했어요. 인터넷 연결을 확인하고 다시 열어 주세요.</p>' +
-        '<button class="g-btn primary" id="gRetry">다시 시도</button><button class="g-link" id="gLocal">이 기기에서만 쓰기</button>');
-      $('gRetry').onclick = () => startFirebase(); $('gLocal').onclick = () => startLocal();
+        '<button class="g-btn primary" id="gRetry">다시 시도</button>');
+      $('gRetry').onclick = () => startFirebase();
     }
   }
   $('logoutBtn').addEventListener('click', async () => {
@@ -464,9 +462,10 @@
   if ('serviceWorker' in navigator) { window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); }); }
 
   (function boot(){
-    const m = Backend.savedMode();
-    if (m === 'local') startLocal();
-    else if (Backend.hasConfig) startFirebase();
+    // 로그인 설정이 있으면 항상 로그인으로 시작한다(예전에 "이 기기 전용"으로 시작한 기기도 로그인 화면으로 간다).
+    // 로그인 설정이 아직 없을 때만 이 기기 전용으로 쓸 수 있다.
+    if (Backend.hasConfig) { if (Backend.savedMode() === 'local') Backend.setMode(null); startFirebase(); }
+    else if (Backend.savedMode() === 'local') startLocal();
     else showSetup();
   })();
 </script>

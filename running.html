@@ -247,6 +247,15 @@
   .goalb .gb-d { flex: none; text-align: center; background: var(--card); border-radius: 14px; padding: 10px 14px; } .goalb .gb-d b { font-size: 28px; font-weight: 800; color: var(--accent); line-height: 1; white-space: nowrap; }
   .goalb.dday .gb-d { background: var(--accent); } .goalb.dday .gb-d b { color: var(--accent-ink); }
   .goalb.off { background: var(--card); border-color: var(--line); }
+  .dt-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 10px; padding: 2px 2px 0; } .dt-head small { display: block; font-size: 14px; color: var(--ink2); font-weight: 600; } .dt-head b { font-size: 36px; font-weight: 800; line-height: 1.1; } .dt-head b span { font-size: 22px; font-weight: 700; } .dt-date { font-size: 13px; color: var(--ink2); padding-bottom: 6px; text-align: right; }
+  .dt-card { background: #141416; border-radius: 22px; padding: 18px 16px 16px; color: #fff; } .dt-ct { font-size: 17px; font-weight: 700; margin: 0 4px 14px; }
+  .dt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .dt-t2 { background: #1c1c1f; border: 1px solid #3a3a40; border-radius: 16px; padding: 14px 8px; display: flex; flex-direction: column; align-items: center; gap: 8px; min-width: 0; } .dt-t2 span { font-size: 13.5px; font-weight: 600; } .dt-t2 b { font-size: 25px; font-weight: 800; color: #fff; white-space: nowrap; } .dt-t2 b small { font-size: 13px; font-weight: 500; color: #a8a8b0; } .dt-na { color: #6f6f78; font-weight: 600; }
+  .dt-sp { padding: 16px 8px 8px; } .dt-sp .dt-ct small { font-size: 12px; font-weight: 500; color: #a8a8b0; margin-left: 6px; } .dt-sp .dt-ct { margin-left: 10px; }
+  .dt-sp table { width: 100%; border-collapse: collapse; font-size: 14.5px; } .dt-sp th { font-size: 12px; font-weight: 500; color: #a8a8b0; padding: 8px 2px; background: #1c1c1f; } .dt-sp td { text-align: center; padding: 11px 2px; border-top: 1px solid #2c2c31; font-variant-numeric: tabular-nums; } .dt-sp td:first-child { color: #d8d8de; width: 9%; }
+  .dt-sp td.pc2 { color: #5BC8F5; } .dt-sp tr.bst td { font-weight: 800; } .dt-sp tr.bst td.pc2 { color: #FF9F3F; }
+  .dt-ex { display: flex; flex-wrap: wrap; gap: 6px; } .dt-chip { background: var(--bg); border-radius: 99px; padding: 6px 12px; font-size: 13.5px; font-weight: 600; } .dt-chip i { font-style: normal; font-weight: 500; color: var(--ink2); margin-right: 6px; }
+  .dt-memo { margin: 0; font-size: 14.5px; line-height: 1.7; background: var(--bg); border-radius: 12px; padding: 10px 14px; overflow-wrap: anywhere; }
   .today { border-left: 5px solid var(--tk, var(--accent)); display: flex; flex-direction: column; gap: 10px; }
   .tg-h { display: flex; justify-content: space-between; align-items: baseline; } .tg-h .lb { font-size: 13px; font-weight: 700; color: var(--ink2); letter-spacing: .02em; } .tg-d { font-size: 13px; color: var(--ink2); }
   .tg-main { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; } .tg-main b { font-size: 26px; font-weight: 800; color: var(--tk); } .tg-main .num { font-size: 26px; font-weight: 800; } .tg-main .num small { font-size: 15px; font-weight: 600; color: var(--ink2); margin-left: 2px; }
@@ -374,9 +383,22 @@
     var t = norm(raw), lines = t.split(/\n/).map(function (s) { return s.trim(); }).filter(Boolean), out = { kind: '' }, m, i;
     // 구간기록 표: "1  07:51  1.00  136  07'51"" 같은 줄
     var splits = [];
+    var prevIdx = 0;
     lines.forEach(function (ln) {
-      var mm = ln.match(/^\D{0,2}(\d{1,3})\s+(\d{1,2}):(\d{2})\s+(\d{1,3}\.\d{1,2})(?:\s|$)/);
-      if (mm && +mm[1] <= 300 && +mm[4] <= 50 && +mm[4] > 0) splits.push({ i: +mm[1], sec: (+mm[2]) * 60 + (+mm[3]), km: +mm[4] });
+      var mm = ln.match(/^\D{0,2}(\d{1,3})\s+(\d{1,2}):(\d{2})\s+(\d{1,3}\.\d{1,2})(?:\s|$)/), idx = 0;
+      if (mm) idx = +mm[1];
+      else if (prevIdx > 0) { // 번호 글자가 깨진 줄("거  01:51  0.36")은 앞 줄 다음 번호로 본다
+        mm = ln.match(/^\D{1,3}\s+(\d{1,2}):(\d{2})\s+(\d{1,2}\.\d{2})(?:\s|$)/);
+        if (mm) { mm = [mm[0], String(prevIdx + 1), mm[1], mm[2], mm[3]]; idx = prevIdx + 1; }
+      }
+      if (mm && idx > 0 && idx <= prevIdx) { idx = prevIdx + 1; mm[1] = String(idx); } // 표는 번호가 이어지므로 "11"이 "1"로 읽힌 경우를 바로잡는다
+      if (mm && +mm[1] <= 300 && +mm[4] <= 50 && +mm[4] > 0) {
+        prevIdx = +mm[1];
+        var sp0 = { i: +mm[1], sec: (+mm[2]) * 60 + (+mm[3]), km: +mm[4] }, rest = ln.slice(mm[0].length), pm2 = rest.match(/(\d{1,2})\s*['°]\s*(\d{2})/), hm2 = rest.match(/^\s*(\d{2,3})(?=\s|$)/);
+        if (hm2 && +hm2[1] >= 60 && +hm2[1] <= 230) sp0.hr = +hm2[1];
+        if (pm2 && +pm2[1] >= 2) sp0.pace = (+pm2[1]) * 60 + (+pm2[2]);
+        splits.push(sp0);
+      }
     });
     if (splits.length >= 2) { out.kind = 'splits'; out.splits = splits; return out; }
     var iDetail = -1; for (i = 0; i < lines.length; i++) if (/상세\s*정보|운동\s*시간|평균\s*페이스/.test(lines[i])) { iDetail = i; break; }
@@ -402,9 +424,21 @@
     var after = pm ? bt.slice(bt.indexOf(pm[0]) + pm[0].length) : bt, nums = (after.replace(/\/\s*k?m?/g, ' ').match(/(?<![\d.:'])\d{2,4}(?![\d.:'])/g) || []).map(Number);
     if (nums.length && nums[0] >= 40 && nums[0] <= 220) hr.push(nums[0]);
     if (nums.length > 1 && nums[1] >= 20 && nums[1] <= 5000) kc.push(nums[1]);
+    // 평균 케이던스(spm)와 상승 고도(m): 단위가 "sem/som"처럼 깨져도 읽고, 그래도 안 되면 라벨 바로 아랫줄의 "165  19"로 읽는다
+    var cad = bt.match(/(\d{3})\s*s[a-z]{1,3}\b/i);
+    if (cad && +cad[1] >= 100 && +cad[1] <= 230) { out.cad = +cad[1]; var evm = bt.slice(cad.index + cad[0].length).match(/^[^\d\n]{0,30}?(\d{1,3})\s*m\b/); if (evm) out.elev = +evm[1]; }
+    if (out.cad == null) {
+      var bl = body.split('\n');
+      for (var li = 0; li < bl.length - 1; li++) {
+        if (/케이던스|상승|고도/.test(bl[li])) { // 실내 러닝처럼 상승 고도 대신 "걸음 수"가 나오는 화면은 케이던스만 읽는다
+          var cm = bl[li + 1].match(/^\s*(\d{3})\b/);
+          if (cm && +cm[1] >= 100 && +cm[1] <= 230) { out.cad = +cm[1]; var em = bl[li + 1].match(/^\s*\d{3}\s+(\d{1,3})\s*m?\s*$/); if (em && !/걸음/.test(bl[li])) out.elev = +em[1]; break; }
+        }
+      }
+    }
     if (!isSummary) isSummary = out.km != null && out.sec != null && out.pace != null; // 윗부분이 잘린 캡처
     if (isSummary) { out.kind = 'summary'; if (hr.length) out.hrs = hr; if (kc.length) out.kcals = kc; }
-    else { delete out.sec; delete out.pace; }
+    else { delete out.sec; delete out.pace; delete out.cad; delete out.elev; }
     // 날씨 화면: "22.0 °C", 습도 "70%"
     if ((m = t.match(/날씨[\s\S]{0,160}?(-?\d{1,2}\.\d)\s*[°º]?\s*[CcⒸ€]/))) { out.temp = parseFloat(m[1]); if (!out.kind) out.kind = 'weather'; }
     // 심박 화면의 "평균 심박수 147 bpm"
@@ -415,12 +449,13 @@
   /* ---------- 여러 번 읽은 값 합치기 ---------- */
   function uniq(a) { var s = {}; return a.filter(function (v) { return v != null && !s[v] && (s[v] = 1); }); }
   function pick(parsed, extraDates) {
-    var km = [], sec = [], pace = [], hr = [], kcal = [], date = extraDates.slice(), temp = null, sp = {};
+    var km = [], sec = [], pace = [], hr = [], kcal = [], date = extraDates.slice(), temp = null, sp = {}, cads = [], elevs = [];
     parsed.forEach(function (p) {
       if (p.km != null) km.push(p.km); if (p.sec != null) sec.push(p.sec); if (p.pace != null) pace.push(p.pace);
       (p.hrs || []).forEach(function (v) { hr.push(v); }); (p.kcals || []).forEach(function (v) { kcal.push(v); });
       if (p.date) date.push(p.date); if (p.temp != null && temp == null) temp = p.temp;
-      (p.splits || []).forEach(function (s) { if (!sp[s.i] || s.km > sp[s.i].km) sp[s.i] = s; });
+      if (p.cad != null) cads.push(p.cad); if (p.elev != null) elevs.push(p.elev);
+      (p.splits || []).forEach(function (s) { var o = sp[s.i], sc = (s.pace ? 1 : 0) + (s.hr ? 1 : 0), so = o ? (o.pace ? 1 : 0) + (o.hr ? 1 : 0) : -1; if (!o || sc > so || (sc === so && s.km > o.km)) sp[s.i] = s; });
     });
     km = uniq(km); sec = uniq(sec); pace = uniq(pace); hr = uniq(hr); kcal = uniq(kcal);
     var rows = Object.keys(sp).map(function (k) { return sp[k]; }).sort(function (a, b) { return a.i - b.i; }), sKm = null, sSec = null;
@@ -449,10 +484,14 @@
     var kk = null; if (res.km) kk = kcal.filter(function (v) { return v >= res.km * 35 && v <= res.km * 160; });
     if (kk && kk.length) res.kcal = kk[0]; else if (kcal.length && !res.km) res.kcal = kcal[0]; else if (kcal.length) res.notes.push('칼로리는 확실하지 않아 비워 뒀어요.');
     if (hr.length) res.hr = hr[0];
+    // 화면에 적힌 평균 페이스(삼성헬스 계산값)는 선택한 거리·시간과 3초 안으로 맞을 때만 쓴다
+    if (pace.length && res.km && res.sec) { var pc = pace.filter(function (p) { return Math.abs(p - res.sec / res.km) <= 3; }); if (pc.length) res.pace = pc[0]; }
+    if (cads.length) res.cadence = cads[0];
+    if (elevs.length) res.elev = elevs[0];
     // 날짜: 가장 많이 나온 값
     if (date.length) { var cnt = {}; date.forEach(function (d) { cnt[d] = (cnt[d] || 0) + 1; }); res.date = Object.keys(cnt).sort(function (a, b) { return cnt[b] - cnt[a]; })[0]; }
     if (temp != null) res.temp = temp;
-    if (okRows.length) res.splitsN = okRows.length;
+    if (okRows.length) { res.splitsN = okRows.length; res.splits = okRows.map(function (s) { return { s: s.sec, k: s.km, h: s.hr || 0, p: s.pace || Math.round(s.sec / s.km) }; }); }
     return res;
   }
 
@@ -1055,6 +1094,11 @@
   var paceTxt = function (sec, km) { if (!(km > 0) || !(sec > 0)) return '-'; var p = Math.round(sec / km); return Math.floor(p / 60) + "'" + pad(p % 60) + '"'; };
 
   /* ---------- 상태 ---------- */
+  // 구간기록(1km 단위): [{s: 구간 시간(초), k: 거리(km), h: 심박(없으면 0), p: 페이스(초/km)}]
+  function normSplits(a) {
+    if (!Array.isArray(a)) return [];
+    return a.slice(0, 150).map(function (x) { return x && { s: Math.round(+x.s), k: r2(+x.k), h: hrOk(x.h), p: paceOk(x.p) }; }).filter(function (x) { return x && x.s > 0 && x.k > 0 && x.k <= 50; }).map(function (x) { if (!x.p) x.p = Math.round(x.s / x.k); return x; });
+  }
   function normalize(j) {
     j = j || {};
     var gl = j.goal || {};
@@ -1077,7 +1121,7 @@
     };
     (Array.isArray(j.runs) ? j.runs : []).forEach(function (r) {
       if (!r || !isDate(r.date || '') || !(+r.km > 0) || !(+r.sec > 0)) return;
-      out.runs.push({ id: String(r.id || uid()), date: r.date, km: r2(+r.km), sec: Math.round(+r.sec), feel: Math.min(5, Math.max(0, Math.floor(+r.feel || 0))), memo: String(r.memo || '').slice(0, 300), kcal: Math.max(0, Math.round(+r.kcal || 0)), hr: Math.max(0, Math.round(+r.hr || 0)), temp: (r.temp === undefined || r.temp === null || r.temp === '' || isNaN(+r.temp)) ? null : Math.max(-40, Math.min(50, Math.round(+r.temp * 10) / 10)) });
+      out.runs.push({ id: String(r.id || uid()), date: r.date, km: r2(+r.km), sec: Math.round(+r.sec), feel: Math.min(5, Math.max(0, Math.floor(+r.feel || 0))), memo: String(r.memo || '').slice(0, 300), kcal: Math.max(0, Math.round(+r.kcal || 0)), hr: Math.max(0, Math.round(+r.hr || 0)), pace: paceOk(r.pace), splits: normSplits(r.splits), cadence: Math.max(0, Math.min(260, Math.round(+r.cadence || 0))), elev: Math.max(0, Math.min(9999, Math.round(+r.elev || 0))), temp: (r.temp === undefined || r.temp === null || r.temp === '' || isNaN(+r.temp)) ? null : Math.max(-40, Math.min(50, Math.round(+r.temp * 10) / 10)) });
     });
     return out;
   }
@@ -1586,6 +1630,19 @@
     return '<section class="card goalb' + (lf === 0 ? ' dday' : '') + '"><div class="gb-t"><span class="lb">최종 목표</span><b>' + distName(g.dist).replace(/\(.*\)/, '') + ' <span class="num">' + timeTxt(g.targetSec) + '</span></b><small>' + esc(s1.join(' · ')) + '</small><small>' + esc(s2.join(' · ')) + '</small></div>' +
       (dd ? '<div class="gb-d"><b class="num">' + dd + '</b></div>' : '<button type="button" class="btn sm" data-act="goal">날짜 정하기</button>') + '</section>';
   }
+  // 상세 화면의 구간기록 표(1km마다 시간·거리·심박·페이스). 1km 이상 구간 중 가장 빠른 구간은 주황색으로 표시한다
+  function splitsHtml(r) {
+    var sp = r.splits || [];
+    if (!sp.length) return '';
+    var hasHr = sp.some(function (x) { return x.h; }), best = -1, bp = 1e9;
+    sp.forEach(function (x, i) { if (x.k >= 0.95 && x.p < bp) { bp = x.p; best = i; } });
+    var pf = function (p) { return pad(Math.floor(p / 60)) + "'" + pad(p % 60) + '"'; };
+    var rows = sp.map(function (x, i) {
+      var tm = pad(Math.floor(x.s / 60)) + ':' + pad(x.s % 60);
+      return '<tr' + (i === best ? ' class="bst"' : '') + '><td>' + (i + 1) + '</td><td>' + tm + '</td><td>' + x.k.toFixed(2) + '</td>' + (hasHr ? '<td>' + (x.h || '-') + '</td>' : '') + '<td class="pc2">' + pf(x.p) + '</td></tr>';
+    }).join('');
+    return '<div class="dt-card dt-sp"><div class="dt-ct">구간기록 <small>1km 단위</small></div><table><thead><tr><th></th><th>시간</th><th>거리(km)</th>' + (hasHr ? '<th>심박수</th>' : '') + '<th>페이스(/km)</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
   function todayHero() {
     var t = todayKey(), c = coachCtx(), ran = state.runs.filter(function (r) { return r.date === t; }), ranKm = r2(sum(ran, function (r) { return r.km; })), ws = weekStart(t);
     var pl = planFor(t), hasWeekPlan = !!planOf(ws), it = null, src = '', nx = nextPlanned(), wLeft = r2(weekGoal(ws).km - kmIn(ws, addDays(ws, 6)));
@@ -1693,7 +1750,7 @@
           else if (M === 'hr') { txt = di.hr ? String(di.hr) : '·'; bg = di.hr ? hrBand(di.hr) : C_NA; }
           else { txt = di.temp != null ? String(Math.round(di.temp)) : '·'; bg = di.temp != null ? tempBand(di.temp) : C_NA; }
           lab += ' · ' + kmTxt(di.km) + 'km · ' + timeTxt(di.sec) + (di.hr ? ' · 심박 ' + di.hr : '') + (di.temp != null ? ' · ' + di.temp + '°C' : '');
-          cells += '<button type="button" class="wkc run' + (isNow ? ' now' : '') + '" style="background:' + bg + '" data-act="edit" data-id="' + di.id + '" title="' + esc(lab) + '" aria-label="' + esc(lab + ' (눌러서 고치기)') + '">' + txt + '</button>';
+          cells += '<button type="button" class="wkc run' + (isNow ? ' now' : '') + '" style="background:' + bg + '" data-act="view" data-id="' + di.id + '" title="' + esc(lab) + '" aria-label="' + esc(lab + ' (눌러서 자세히 보기)') + '">' + txt + '</button>';
         } else cells += '<i class="wkc' + (isNow ? ' now' : '') + (fut ? ' fut' : '') + '" title="' + esc(lab) + '"></i>';
       }
       var side, bar = '';
@@ -1766,7 +1823,7 @@
     var sorted = state.runs.slice().sort(function (a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : 0; }), shown = showAll ? sorted : sorted.slice(0, 15);
     P.log += '<section class="card"><div class="sec-t"><h2>러닝 기록</h2><span>' + state.runs.length + '번</span></div>' +
       (shown.length ? '<div class="runs">' + shown.map(function (r) {
-        return '<button type="button" class="rn" data-act="edit" data-id="' + r.id + '"><span class="d"><b class="num">' + dshort(r.date) + '</b>' + DOW[dowOf(r.date)] + '</span><span><span class="km num">' + kmTxt(r.km) + 'km</span> <span class="meta num">' + timeTxt(r.sec) + (r.hr ? ' · 심박 ' + r.hr : '') + (r.temp != null ? ' · ' + r.temp + '°C' : '') + (r.kcal ? ' · ' + r.kcal + 'kcal' : '') + (r.feel ? ' · ' + FEEL[r.feel - 1] : '') + '</span>' + (r.memo ? '<div class="meta">' + esc(r.memo) + '</div>' : '') + '</span><span class="pace num">' + paceTxt(r.sec, r.km) + '/km</span></button>';
+        return '<button type="button" class="rn" data-act="view" data-id="' + r.id + '"><span class="d"><b class="num">' + dshort(r.date) + '</b>' + DOW[dowOf(r.date)] + '</span><span><span class="km num">' + kmTxt(r.km) + 'km</span> <span class="meta num">' + timeTxt(r.sec) + (r.hr ? ' · 심박 ' + r.hr : '') + (r.temp != null ? ' · ' + r.temp + '°C' : '') + (r.kcal ? ' · ' + r.kcal + 'kcal' : '') + (r.feel ? ' · ' + FEEL[r.feel - 1] : '') + '</span>' + (r.memo ? '<div class="meta">' + esc(r.memo) + '</div>' : '') + '</span><span class="pace num">' + paceTxt(r.sec, r.km) + '/km</span></button>';
       }).join('') + '</div>' + (sorted.length > shown.length ? '<div class="empty"><button type="button" class="linkbtn" data-act="more">전체 보기 (' + (sorted.length - shown.length) + '개 더)</button></div>' : '') :
         '<div class="empty"><b>아직 러닝 기록이 없어요</b>위의 “달린 것 기록하기”로 첫 기록을 남겨 보세요.</div>') + '</section>';
 
@@ -1799,6 +1856,8 @@
         '<p class="pace-live" id="rn-pace" aria-live="polite">거리와 시간을 입력하면 페이스를 계산해요.</p>' +
         '<div class="row2"><div class="field"><label for="rn-kcal">칼로리 (kcal, 선택)</label><input type="number" id="rn-kcal" min="0" max="9999" step="1" inputmode="numeric" value="' + (r && r.kcal ? r.kcal : '') + '"></div>' +
         '<div class="field"><label for="rn-hr">평균 심박 (bpm, 선택)</label><input type="number" id="rn-hr" min="0" max="250" step="1" inputmode="numeric" value="' + (r && r.hr ? r.hr : '') + '"></div></div>' +
+        '<div class="row2"><div class="field"><label for="rn-cad">평균 케이던스 (spm, 선택)</label><input type="number" id="rn-cad" min="0" max="260" step="1" inputmode="numeric" value="' + (r && r.cadence ? r.cadence : '') + '"></div>' +
+        '<div class="field"><label for="rn-elev">상승 고도 (m, 선택)</label><input type="number" id="rn-elev" min="0" max="9999" step="1" inputmode="numeric" value="' + (r && r.elev ? r.elev : '') + '"></div></div>' +
         '<div class="field"><span class="lb">컨디션 (선택)</span><div class="chips">' + FEEL.map(function (f, i) { return '<button type="button" class="chip" data-act="feel" data-n="' + (i + 1) + '" aria-pressed="' + (r && r.feel === i + 1) + '">' + f + '</button>'; }).join('') + '</div></div>' +
         '<div class="field"><label for="rn-temp">기온 (°C, 선택)</label><input type="number" id="rn-temp" min="-40" max="50" step="0.1" inputmode="decimal" value="' + (r && r.temp != null ? r.temp : '') + '" placeholder="예: 22"></div>' +
         '<div class="field"><label for="rn-memo">한 줄 메모 (선택)</label><textarea id="rn-memo" maxlength="300" placeholder="코스, 날씨, 몸 상태를 짧게 남겨요">' + esc(r ? r.memo : '') + '</textarea></div>' +
@@ -1848,6 +1907,27 @@
         '<div class="row2"><div class="field"><label for="gl-lt1p">유산소 역치 페이스 (선택)</label><input type="text" id="gl-lt1p" placeholder="예: 6:40" value="' + mmss(gg.lt1Pace) + '" autocomplete="off"></div><div class="field"><label for="gl-lt2p">무산소 역치 페이스 (선택)</label><input type="text" id="gl-lt2p" placeholder="예: 5:35" value="' + mmss(gg.lt2Pace) + '" autocomplete="off"></div></div></div>' +
         '<div class="field"><label for="gl-hr">최대 심박 (bpm, 선택)</label><input type="number" id="gl-hr" min="100" max="230" inputmode="numeric" value="' + (gg.maxHr || '') + '" placeholder="모르면 비워 두세요"></div>' +
         '<p class="msg" id="gl-msg" role="alert"></p><div class="sheet-f"><button type="button" class="btn primary" data-act="goal-save">저장</button><button type="button" class="btn" data-act="close">취소</button></div>';
+    }
+    else if (s.type === 'view') {
+      var vr = state.runs.filter(function (x) { return x.id === s.id; })[0];
+      if (!vr) h = '<h2 id="sheet-title">러닝 기록</h2><p class="help">기록을 찾지 못했어요.</p><div class="sheet-f"><button type="button" class="btn" data-act="close">닫기</button></div>';
+      else {
+        var vp = vr.pace && Math.abs(vr.pace - vr.sec / vr.km) <= 3 ? vr.pace : Math.round(vr.sec / vr.km), vpd = pad(Math.floor(vp / 60)) + "'" + pad(vp % 60) + '"', vc = coachCtx(), vcl = classify({ km: vr.km, sec: vr.sec, hr: vr.hr }, vc), vd = parseKey(vr.date);
+        var vt = function (lab, col, val) { return '<div class="dt-t2"><span style="color:' + col + '">' + lab + '</span><b class="num">' + val + '</b></div>'; };
+        var dash = '<span class="dt-na">-</span>';
+        h = '<div class="dt-head"><div><small>달리기</small><b class="num">' + kmTxt(vr.km) + '<span> km</span></b></div><span class="dt-date">' + vd.getFullYear() + '년 ' + (vd.getMonth() + 1) + '월 ' + vd.getDate() + '일 (' + DOW[vd.getDay()] + ')</span></div>' +
+          '<div class="dt-card"><div class="dt-ct">운동 상세정보</div><div class="dt-grid">' +
+          vt('운동 시간', '#5BC8F5', timeTxt(vr.sec)) +
+          vt('평균 페이스', '#4FD1B5', vpd + '<small> /km</small>') +
+          vt('평균 심박수', '#FF77AA', vr.hr ? vr.hr + '<small> bpm</small>' : dash) +
+          vt('운동 칼로리', '#A57BEA', vr.kcal ? vr.kcal.toLocaleString('ko-KR') + '<small> kcal</small>' : dash) +
+          vt('평균 케이던스', '#EC8CEB', vr.cadence ? vr.cadence + '<small> spm</small>' : dash) +
+          vt('상승 고도', '#A5DB57', vr.elev ? vr.elev + '<small> m</small>' : dash) + '</div></div>' +
+          splitsHtml(vr) +
+          '<div class="dt-ex">' + (vcl ? '<span class="dt-chip"><i>강도</i>' + CL_TXT[vcl.k][0] + '</span>' : '') + (vr.temp != null ? '<span class="dt-chip"><i>기온</i>' + vr.temp + '°C</span>' : '') + (vr.feel ? '<span class="dt-chip"><i>컨디션</i>' + FEEL[vr.feel - 1] + '</span>' : '') + '</div>' +
+          (vr.memo ? '<p class="dt-memo">' + esc(vr.memo) + '</p>' : '') +
+          '<div class="sheet-f"><button type="button" class="btn primary" data-act="edit" data-id="' + vr.id + '">수정</button><button type="button" class="btn" data-act="close">닫기</button></div>';
+      }
     }
     else if (s.type === 'ask') {
       h = '<h2 id="sheet-title">코치에게 물어보기</h2><p class="help">AI가 아니라 내 기록과 러닝 상식으로 답하는 코치예요. 훈련·페이스·기록 예상·부상·대회·영양·장비를 물어보세요.</p>' +
@@ -1903,8 +1983,14 @@
     var before = records(), dates = [date], old = s.id ? state.runs.filter(function (x) { return x.id === s.id; })[0] : null;
     var kcal = Math.max(0, Math.round(+$('#rn-kcal').value || 0)), hr = Math.max(0, Math.round(+$('#rn-hr').value || 0));
     var tRaw = $('#rn-temp').value, temp = tRaw === '' || isNaN(+tRaw) ? null : Math.max(-40, Math.min(50, Math.round(+tRaw * 10) / 10));
-    if (old) { dates.push(old.date); old.date = date; old.km = km; old.sec = sec; old.feel = s.feel || 0; old.memo = memo; old.kcal = kcal; old.hr = hr; old.temp = temp; }
-    else state.runs.push({ id: uid(), date: date, km: km, sec: sec, feel: s.feel || 0, memo: memo, kcal: kcal, hr: hr, temp: temp });
+    var cadence = Math.max(0, Math.min(260, Math.round(+$('#rn-cad').value || 0))), elev = Math.max(0, Math.min(9999, Math.round(+$('#rn-elev').value || 0)));
+    var calcP = sec / km, pace = shotPace && Math.abs(shotPace - calcP) <= 3 ? shotPace : (old && old.pace && Math.abs(old.pace - calcP) <= 3 ? old.pace : 0);
+    // 구간기록은 달린 거리와 합계가 맞을 때만 남긴다(다른 운동의 사진이 섞이지 않게)
+    var spOk = function (a) { return a && a.length >= 2 && Math.abs(sum(a, function (x) { return x.k; }) - km) <= Math.max(0.3, km * 0.03); };
+    var splits = spOk(shotSplits) ? shotSplits : (old && spOk(old.splits) ? old.splits : []);
+    if (old) { dates.push(old.date); old.date = date; old.km = km; old.sec = sec; old.feel = s.feel || 0; old.memo = memo; old.kcal = kcal; old.hr = hr; old.temp = temp; old.cadence = cadence; old.elev = elev; old.pace = pace; old.splits = splits; }
+    else state.runs.push({ id: uid(), date: date, km: km, sec: sec, feel: s.feel || 0, memo: memo, kcal: kcal, hr: hr, temp: temp, cadence: cadence, elev: elev, pace: pace, splits: splits });
+    shotPace = 0; shotSplits = null;
     commit(dates); closeSheet();
     var after = records(), t = todayKey(), ws = weekStart(t), we = addDays(ws, 6), wKm = r2(sum(state.runs.filter(function (r) { return inRange(r, ws, we); }), function (r) { return r.km; }));
     var notes = [];
@@ -1917,7 +2003,7 @@
   /* ---------- 삼성헬스 캡처 읽기 ----------
      캡처 사진의 글자를 이 기기 안에서 읽어(OCR) 거리·시간·날짜·칼로리·심박·기온을 입력칸에 채운다. 처음 한 번 읽기 도구(약 10MB)를 내려받는다.
      사진은 저장하지 않고, 읽은 값은 꼭 확인한 뒤 저장하게 한다. 실제 읽기 규칙은 위쪽 OCR2 스크립트에 있다. */
-  var OCR = { worker: null, loading: null };
+  var OCR = { worker: null, loading: null }, shotPace = 0, shotSplits = null; // shotPace: 사진에서 읽은 평균 페이스(초/km). 저장할 때 거리·시간과 맞으면 같이 남긴다
   function loadScript(src) { return new Promise(function (res, rej) { var s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = function () { rej(new Error('load ' + src)); }; document.head.appendChild(s); }); }
   async function getOcr() {
     if (OCR.worker) return OCR.worker;
@@ -1949,6 +2035,10 @@
     if (merged.date) { put('#rn-date', merged.date); got.push('날짜 ' + dshort(merged.date)); }
     if (merged.kcal) { put('#rn-kcal', merged.kcal); got.push(merged.kcal + 'kcal'); }
     if (merged.hr) { put('#rn-hr', merged.hr); got.push('심박 ' + merged.hr); }
+    shotPace = merged.pace || 0; shotSplits = merged.splits && merged.splits.length >= 2 ? merged.splits : null;
+    if (shotSplits) got.push('구간기록 ' + shotSplits.length + '개');
+    if (merged.cadence) { put('#rn-cad', merged.cadence); got.push('케이던스 ' + merged.cadence); }
+    if (merged.elev != null) { put('#rn-elev', merged.elev); got.push('상승 ' + merged.elev + 'm'); }
     if (merged.temp != null) { put('#rn-temp', merged.temp); got.push('기온 ' + merged.temp + '°C'); }
     updatePace();
     var notes = merged.notes.slice(), dset = {}; dates.forEach(function (d) { dset[d] = 1; });
@@ -2016,6 +2106,7 @@
     else if (act === 'qa-copy') qaCopy(+t.dataset.i);
     else if (act === 'log') openSheet({ type: 'log' });
     else if (act === 'edit') openSheet({ type: 'log', id: id });
+    else if (act === 'view') openSheet({ type: 'view', id: id });
     else if (act === 'close') closeSheet();
     else if (act === 'km') { $('#rn-km').value = t.dataset.n; updatePace(); }
     else if (act === 'feel') { var on = sheet.feel === +t.dataset.n; sheet.feel = on ? 0 : +t.dataset.n; document.querySelectorAll('[data-act=feel]').forEach(function (c) { c.setAttribute('aria-pressed', String(+c.dataset.n === sheet.feel)); }); }

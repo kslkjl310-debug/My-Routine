@@ -849,26 +849,64 @@ function renderResult(container, model, spoken, score, opts = {}) {
 
 // ---------- 음성 인식 ----------
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+// 안드로이드 크롬은 말하는 도중의 결과를 "I" → "I can" → "I can take"처럼 누적해서 "확정" 결과로 여러 번 보낸다.
+// 그대로 이어 붙이면 단어가 겹쳐 반복되므로, 앞 결과를 이어 늘리는 결과는 앞 결과를 대체하고, 겹치는 부분은 한 번만 쓴다.
+const srNorm = (s) => String(s || "").replace(/\s+/g, " ").trim();
+function srJoin(list) {
+  const out = [];
+  for (const raw of list) {
+    const t = srNorm(raw); if (!t) continue;
+    if (!out.length) { out.push(t); continue; }
+    const wl = out[out.length - 1].split(" "), wt = t.split(" "), lo = wl.map(w => w.toLowerCase()), to = wt.map(w => w.toLowerCase());
+    if (to.length <= lo.length && to.every((w, i) => w === lo[i])) continue;               // 앞 결과의 앞부분(또는 같은 결과)이면 건너뛴다
+    if (to.length > lo.length && lo.every((w, i) => w === to[i])) { out[out.length - 1] = t; continue; } // 앞 결과를 이어 늘린 결과면 대체한다
+    let k = Math.min(lo.length, to.length) - 1;                                              // 끝과 처음이 2단어 이상 겹치면 겹친 부분을 한 번만 쓴다
+    for (; k >= 2; k--) if (lo.slice(-k).every((w, i) => w === to[i])) break;
+    if (k >= 2) { out[out.length - 1] = wl.concat(wt.slice(k)).join(" "); continue; }
+    out.push(t);
+  }
+  return out.join(" ");
+}
+// 음성 인식기. 폰에서는 잠깐 말이 끊기면 인식이 저절로 끝나 버리므로, "끝내기"를 누르기 전에는 자동으로 다시 이어서 듣는다.
 function makeRecognizer(onText, onEnd, onErr) {
   if (!SR) return null;
-  const r = new SR();
-  r.lang = "en-US";
-  r.continuous = true;
-  r.interimResults = true;
-  let finalText = "";
-  r.onresult = (e) => {
-    let interim = "";
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) finalText += t + " ";
-      else interim += t;
-    }
-    onText(finalText, interim);
+  const ctl = { onend: onEnd, onerror: onErr };
+  let base = "", sessFinal = "", sessInterim = "", stopped = false, ended = false, fatal = false, restarts = 0, inst = null, stopTimer = 0;
+  const emit = () => { if (onText) onText(srJoin([base, sessFinal]), sessInterim); };
+  const finish = () => { if (ended) return; ended = true; clearTimeout(stopTimer); if (ctl.onend) ctl.onend(base); };
+  const startInst = () => {
+    const r = new SR();
+    r.lang = "en-US"; r.continuous = true; r.interimResults = true;
+    inst = r; sessFinal = ""; sessInterim = "";
+    r.onresult = (e) => {
+      const all = [], fin = [];
+      for (let i = 0; i < e.results.length; i++) { const t = e.results[i][0].transcript; all.push(t); if (e.results[i].isFinal) fin.push(t); }
+      sessFinal = srJoin(fin);
+      const full = srJoin(all);
+      sessInterim = full.toLowerCase().indexOf(sessFinal.toLowerCase()) === 0 ? full.slice(sessFinal.length).trim() : "";
+      emit();
+    };
+    r.onerror = (e) => {
+      if (e.error === "no-speech" || e.error === "aborted") return; // 말이 잠깐 없었을 뿐이라 계속 듣는다
+      fatal = true; if (ctl.onerror) ctl.onerror(e.error);
+    };
+    r.onend = () => {
+      if (inst !== r) return;
+      base = srJoin([base, sessFinal, sessInterim]); sessFinal = ""; sessInterim = ""; // 마지막에 남은 임시 결과도 확정한다
+      if (!stopped && !fatal && restarts < 25) { restarts++; setTimeout(() => { if (!stopped && !ended) { try { startInst(); } catch (x) { finish(); } } }, 250); return; }
+      finish();
+    };
+    r.start();
   };
-  r.onerror = (e) => onErr && onErr(e.error);
-  r.onend = () => onEnd && onEnd(finalText);
-  r.getFinal = () => finalText;
-  return r;
+  ctl.start = () => { startInst(); };
+  ctl.stop = () => {
+    stopped = true;
+    if (!inst) { finish(); return; }
+    try { inst.stop(); } catch (e) {}
+    stopTimer = setTimeout(() => { base = srJoin([base, sessFinal, sessInterim]); sessFinal = ""; sessInterim = ""; finish(); }, 1500); // 인식기가 끝났다고 알려 주지 않아도 마무리한다
+  };
+  ctl.getFinal = () => srJoin([base, sessFinal]);
+  return ctl;
 }
 
 // ---------- TTS ----------
@@ -1114,15 +1152,26 @@ function prefetchSpeech(text) {
 }
 function nnCtx() {
   const A = window.AudioContext || window.webkitAudioContext;
-  NN.ctx = NN.ctx || new A();
+  // AI 음성은 24kHz로 만들어진다. 재생 장치(폰은 보통 48kHz)에 맞춰 브라우저가 거칠게 늘리면 지지직거리는 잡음이 생기므로,
+  // 24kHz 오디오 환경을 만들어 두고 장치로 보낼 때 브라우저가 고품질로 변환하게 한다.
+  if (!NN.ctx) { try { NN.ctx = new A({ sampleRate: 24000 }); } catch (e) { NN.ctx = new A(); } }
   if (NN.ctx.state === "suspended" && !NN.paused) NN.ctx.resume(); // 일시정지 중에는 저절로 재개하지 않는다
   return NN.ctx;
+}
+// 재생용 복사본: 소리가 최대치를 넘어 깨지지 않게 줄이고, 앞뒤를 짧게 부드럽게 해서 문장 사이 "틱" 소리를 없앤다
+function nnPrep(src, sr) {
+  let peak = 0;
+  for (let i = 0; i < src.length; i++) { const a = Math.abs(src[i]); if (a > peak) peak = a; }
+  const g = peak > 0.9 ? 0.9 / peak : 1, f = new Float32Array(src.length), n = Math.min(Math.round(sr * 0.008), src.length >> 1);
+  for (let i = 0; i < src.length; i++) f[i] = src[i] * g;
+  for (let i = 0; i < n; i++) { const w = i / n; f[i] *= w; f[f.length - 1 - i] *= w; }
+  return f;
 }
 function nnPlay(v, token) {
   return new Promise(res => {
     if (token !== NN.token) return res();
     const ctx = nnCtx(), b = ctx.createBuffer(1, v.f.length, v.sr);
-    b.copyToChannel(v.f, 0);
+    b.copyToChannel(nnPrep(v.f, v.sr), 0);
     const s = ctx.createBufferSource(); s.buffer = b; s.connect(ctx.destination);
     NN.src = s; NN.endCb = res;
     s.onended = () => { if (NN.src === s) { NN.src = null; NN.endCb = null; } res(); };
@@ -2719,9 +2768,16 @@ async function qzStart() {
   } finally { qzBusy = false; }
 }
 
-function qzStopRec() { if (Z.rec) { try { Z.rec.stop(); } catch (e) {} } }
+function qzStopRec() { clearTimeout(Z.autoT); if (Z.rec) { try { Z.rec.stop(); } catch (e) {} } }
+// 문장 단어 수의 90% 이상을 말하고 1.8초 동안 새 말이 없으면 말하기를 끝낸 것으로 본다(그 전에는 "말하기 끝"을 누를 때까지 계속 듣는다)
+function qzAuto() {
+  clearTimeout(Z.autoT);
+  if (!Z.recOn || !Z.words.length) return;
+  const n = ((Z.said || "") + " " + (Z.interim || "")).split(/\s+/).filter(Boolean).length;
+  if (n >= Math.max(3, Math.ceil(Z.words.length * 0.9))) Z.autoT = setTimeout(() => { if (Z.recOn) qzStopRec(); }, 1800);
+}
 function qzStopAll() {
-  clearTimeout(Z.timer);
+  clearTimeout(Z.timer); clearTimeout(Z.autoT);
   if (Z.rec) { try { Z.rec.onend = null; Z.rec.onerror = null; Z.rec.stop(); } catch (e) {} Z.rec = null; }
   Z.recOn = false; stopSpeech();
 }
@@ -2790,11 +2846,12 @@ function qzTr() {
 function qzStartRec() {
   if (!SR) { qzErr("이 브라우저는 음성 인식을 지원하지 않아요. 타이핑으로 답해 주세요."); return; }
   stopSpeech(); Z.said = ""; Z.interim = ""; Z.lastErr = "";
-  const r = makeRecognizer((fin, interim) => { Z.said = fin; Z.interim = interim; qzTr(); },
+  const r = makeRecognizer((fin, interim) => { Z.said = fin; Z.interim = interim; qzTr(); qzAuto(); },
     (fin) => {
       if (Z.rec !== r) return;
+      clearTimeout(Z.autoT);
       Z.recOn = false; Z.rec = null;
-      const text = ((fin || "") + " " + (Z.interim || "")).trim();
+      const text = (fin || "").trim();
       if (text) qzSubmit(text, false);
       else { qzDraw(); qzErr(Z.lastErr || "인식된 내용이 없어요. 다시 말하거나 타이핑으로 답해 주세요."); }
     },
@@ -2804,7 +2861,7 @@ function qzStartRec() {
   qzDraw();
 }
 function qzSubmit(said, reveal) {
-  clearTimeout(Z.timer);
+  clearTimeout(Z.timer); clearTimeout(Z.autoT);
   if (Z.rec) { try { Z.rec.onend = null; Z.rec.stop(); } catch (e) {} Z.rec = null; Z.recOn = false; }
   Z.reveal = !!reveal; Z.said = reveal ? "" : said; Z.interim = "";
   const g = reveal ? { ok: Z.words.map(() => false), hit: 0, cnt: Z.words.length, acc: 0 } : qzGrade(Z.words, said);

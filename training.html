@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>영어 훈련 플레이어</title>
+<script>
+/* 허브 안에서 열렸을 때: 허브(부모 화면)에게 메시지로 부탁해서 계정 저장소를 쓰고, 다른 영역의 도구로 이동한다.
+   (My Tools Hub의 다른 도구들과 같은 방식) */
+(function () {
+  if (window.parent === window) return;
+  document.documentElement.classList.add('emb');
+  var P = window.parent, seq = 0, pending = {}, subs = {};
+  function post(m) { m.__hub = 1; P.postMessage(m, '*'); }
+  function call(cap, op, args) {
+    return new Promise(function (res, rej) {
+      var id = ++seq; pending[id] = { res: res, rej: rej };
+      post({ id: id, cap: cap, op: op, args: args || [] });
+    });
+  }
+  function docSnap(d) {
+    var body = d.data;
+    return { id: d.id, exists: !!d.exists, metadata: d.metadata || {},
+      data: function () { return body == null ? undefined : JSON.parse(JSON.stringify(body)); } };
+  }
+  function wrap(s) {
+    if (!s) return s;
+    if (s.kind === 'doc') return docSnap(s);
+    var docs = (s.docs || []).map(docSnap);
+    return { docs: docs, size: docs.length, empty: !docs.length, metadata: s.metadata || {}, docChanges: function () { return []; } };
+  }
+  window.addEventListener('message', function (e) {
+    if (e.source !== P) return;
+    var m = e.data; if (!m || !m.__hubr) return;
+    if (m.sub) { var s = subs[m.sub]; if (!s) return; if (m.err) { if (s.err) s.err(m.err); } else s.next(wrap(m.snap)); return; }
+    var p = pending[m.id]; if (!p) return; delete pending[m.id];
+    if (m.err) p.rej(m.err); else p.res(m.val);
+  });
+  function subscribe(kind, path, lim, next, err) {
+    var id = ++seq; subs[id] = { next: next, err: err };
+    post({ sub: id, kind: kind, path: path, lim: lim || null });
+    return function () { delete subs[id]; post({ unsub: id }); };
+  }
+  function docRef(path) {
+    return {
+      id: path.split('/').pop(), path: path,
+      get: function () { return call('db', 'docGet', [path]).then(wrap); },
+      set: function (d) { return call('db', 'docSet', [path, d]); },
+      update: function (d) { return call('db', 'docUpdate', [path, d]); },
+      'delete': function () { return call('db', 'docDel', [path]); },
+      collection: function (sub) { return colRef(path + '/' + sub); },
+      onSnapshot: function (next, err) { return subscribe('doc', path, null, next, err); }
+    };
+  }
+  function colRef(path, lim) {
+    return {
+      path: path,
+      doc: function (id) { return docRef(path + '/' + (id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 8)))); },
+      limit: function (n) { return colRef(path, n); },
+      get: function () { return call('db', 'colGet', [path, lim || null]).then(wrap); },
+      onSnapshot: function (next, err) { return subscribe('col', path, lim, next, err); }
+    };
+  }
+  var capsP = null;
+  function caps() {
+    if (!capsP) capsP = new Promise(function (res) {
+      var done = false;
+      call('hub', 'caps', []).then(function (c) { done = true; res(c || {}); }, function () { done = true; res({}); });
+      setTimeout(function () { if (!done) res({}); }, 12000);
+    });
+    return capsP;
+  }
+  var api = {
+    use: function (name) {
+      return caps().then(function (c) {
+        if (!c[name]) return null;
+        if (name === 'db') return { doc: docRef, collection: function (p) { return colRef(p); } };
+        if (name === 'user') return {
+          id: function () { return call('user', 'id', []); },
+          isOwner: function () { return false; }, canEdit: function () { return false; }, can: function () { return null; }
+        };
+        if (name === 'downloads') return { save: function (r) { return call('downloads', 'save', [{ filename: r.filename, data: r.data }]); } };
+        return null;
+      });
+    }
+  };
+  window.__hubClaude = api;
+  window.__hubNav = function (key) { post({ nav: key }); };
+  window.__hubTools = function () { return call('hub', 'tools', []); };
+  // 도구가 "오늘 이만큼 했다"는 수치를 알려 주면 허브가 계정에 남기고, 루틴이 그 수치로 자동 체크한다
+  window.__hubReport = function (r) { post({ report: r }); };
+})();
+</script>
+<script src="version.js"></script>
+<style>
+  /* Layout: 홈(오늘 훈련·이어서 하기) / 자료(mp3 묶음) / 기록 / 설정. 훈련을 시작하면 플레이어가 화면을 채운다.
+     mp3 한 파일 = 한 문단. 문단마다 정한 횟수만큼 반복하고, 반복 사이에 따라 말할 틈을 둔다. */
+  :root {
+    --bg: #f6f6f8; --card: #ffffff; --line: #e8e9ee; --track: #e6e7ec;
+    --ink: #1a1b1f; --ink2: #6b6e7a; --accent: #6a4fd6; --accent-ink: #ffffff; --accent-soft: #efeafc;
+    --done: #2f9e5f; --done-soft: #e3f5ea; --warn: #b4540a; --warn-soft: #fdf1e3;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", Pretendard, Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 var(--font); }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .num { font-variant-numeric: tabular-nums; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 22px max(18px, env(safe-area-inset-left, 0px)) 48px max(18px, env(safe-area-inset-right, 0px)); display: flex; flex-direction: column; gap: 16px; }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 10px 14px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: -.01em; } h1 .ver { font-size: 11px; font-weight: 500; color: var(--ink2); margin-left: 6px; letter-spacing: 0; vertical-align: middle; }
+  .saved { font-size: 12.5px; font-weight: 600; color: var(--done); } .saved.busy { color: var(--ink2); } .saved.local { color: var(--warn); }
+  .btn { min-height: 40px; padding: 0 16px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); font-weight: 600; font-size: 14px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
+  .btn:hover { border-color: #c9cbd4; } .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn.sm { min-height: 34px; padding: 0 12px; font-size: 13px; } .btn.danger { color: var(--warn); } .btn[disabled] { opacity: .45; cursor: default; }
+  .linkbtn { background: none; border: 0; padding: 0; color: var(--accent); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 20px; box-shadow: 0 1px 2px rgba(20, 22, 30, .04); }
+  .bar { height: 8px; border-radius: 99px; background: var(--track); overflow: hidden; } .bar i { display: block; height: 100%; width: 0; border-radius: 99px; background: var(--accent); } .bar.done i { background: var(--done); }
+  .sec-t { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; } .sec-t h2 { margin: 0; font-size: 16px; } .sec-t span { font-size: 12.5px; color: var(--ink2); }
+  .help { font-size: 12.5px; color: var(--ink2); margin: 0; } .empty { padding: 22px 12px; text-align: center; color: var(--ink2); } .empty b { display: block; color: var(--ink); font-size: 16px; margin-bottom: 4px; }
+  .tabs { display: flex; gap: 4px; position: sticky; top: 0; z-index: 6; background: var(--bg); padding: 6px 0; margin: -6px 0; overflow-x: auto; }
+  .tabs button { flex: 1 0 auto; min-height: 42px; padding: 0 14px; border-radius: 10px; border: 1px solid transparent; background: transparent; font-weight: 700; font-size: 14.5px; color: var(--ink2); white-space: nowrap; }
+  .tabs button[aria-selected="true"] { background: var(--card); border-color: var(--line); color: var(--accent); box-shadow: 0 1px 2px rgba(20, 22, 30, .06); }
+  .pane { display: flex; flex-direction: column; gap: 16px; }
+  /* 오늘 */
+  .today { display: flex; flex-direction: column; gap: 12px; } .today .lb { font-size: 13px; color: var(--ink2); font-weight: 600; }
+  .today .row { display: flex; gap: 10px; } .today .big { font-size: 32px; font-weight: 800; line-height: 1.05; } .today .big small { font-size: 14px; font-weight: 600; color: var(--ink2); margin-left: 3px; }
+  .today .cell { flex: 1 1 0; min-width: 0; background: var(--bg); border-radius: 12px; padding: 12px; }
+  .goalline { font-size: 13px; color: var(--ink2); } .goalline b { color: var(--ink); }
+  /* 자료 */
+  .setcard { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; }
+  .setcard:hover { border-color: var(--accent); } .setcard .ico { flex: none; width: 42px; height: 42px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; font-size: 20px; }
+  .setcard .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; } .setcard .tx b { font-size: 15.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .setcard .tx small { font-size: 12.5px; color: var(--ink2); }
+  .setcard .go { font-size: 22px; color: var(--ink2); } .sets { display: flex; flex-direction: column; gap: 10px; }
+  .miss { font-size: 12.5px; color: var(--warn); background: var(--warn-soft); border-radius: 10px; padding: 8px 12px; }
+  .trk { display: flex; align-items: center; gap: 8px; padding: 10px 2px; border-top: 1px solid var(--line); } .trk:first-child { border-top: 0; }
+  .trk .n { flex: none; width: 26px; text-align: center; color: var(--ink2); font-size: 12.5px; } .trk .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; background: none; border: 0; text-align: left; padding: 6px 0; }
+  .trk small { color: var(--ink2); font-size: 12px; white-space: nowrap; } .trk .tag { font-size: 11px; color: var(--accent); background: var(--accent-soft); border-radius: 99px; padding: 1px 7px; }
+  .trk input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--accent); flex: none; } .trk .mx { color: var(--warn); font-size: 12px; }
+  .tact { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  /* 기록 */
+  .tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; } .tile { background: var(--bg); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .tile .lb { font-size: 12px; color: var(--ink2); } .tile .v { font-size: 20px; font-weight: 800; } .tile .v small { font-size: 12px; font-weight: 600; color: var(--ink2); }
+  .days { display: flex; flex-direction: column; gap: 6px; } .dayrow { display: grid; grid-template-columns: 64px 1fr 92px; align-items: center; gap: 10px; font-size: 13px; } .dayrow .bar { height: 10px; } .dayrow span:last-child { text-align: right; color: var(--ink2); }
+  /* 설정 */
+  .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; } .field > .lb { font-size: 13px; font-weight: 700; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; } .chip { min-height: 36px; padding: 0 14px; border-radius: 99px; border: 1px solid var(--line); background: var(--card); font-weight: 600; font-size: 13.5px; } .chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  select, input[type=number], input[type=text], textarea { min-height: 40px; border: 1px solid var(--line); border-radius: 10px; padding: 0 12px; background: var(--card); } textarea { padding: 10px 12px; width: 100%; line-height: 1.6; }
+  .chk { display: flex; align-items: center; gap: 10px; } .chk input { width: 20px; height: 20px; accent-color: var(--accent); }
+  /* 플레이어 */
+  .player { position: fixed; inset: 0; z-index: 30; background: var(--bg); overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .pl { max-width: 760px; margin: 0 auto; padding: 16px max(16px, env(safe-area-inset-left, 0px)) 40px max(16px, env(safe-area-inset-right, 0px)); display: flex; flex-direction: column; gap: 12px; }
+  .pl-top { display: flex; align-items: center; gap: 10px; } .pl-ti { flex: 1; min-width: 0; } .pl-ti b { display: block; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pl-ti small { color: var(--ink2); font-size: 12.5px; }
+  .pl-sub { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px; min-height: 120px; font-size: 19px; line-height: 1.7; display: flex; align-items: center; justify-content: center; text-align: center; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .pl-sub.dim { color: var(--ink2); font-size: 14px; } .pl-sub.hide { cursor: pointer; }
+  .pl-st { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px; color: var(--ink2); } .pl-st b { color: var(--accent); }
+  .pl-st.gap b { color: var(--done); }
+  .pl-ctrl { display: flex; justify-content: center; align-items: center; gap: 14px; margin: 4px 0; }
+  .cbtn { width: 56px; height: 56px; border-radius: 50%; border: 1px solid var(--line); background: var(--card); font-size: 22px; display: grid; place-items: center; } .cbtn.big { width: 76px; height: 76px; font-size: 30px; background: var(--accent); color: #fff; border-color: var(--accent); } .cbtn small { font-size: 10px; display: block; line-height: 1; margin-top: 2px; }
+  .pl-opt { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; } .pl-opt .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } .pl-opt .lb { font-size: 12.5px; color: var(--ink2); font-weight: 700; min-width: 46px; }
+  .pl-opt summary { cursor: pointer; font-weight: 700; font-size: 13px; color: var(--accent); list-style: none; } .pl-opt summary::-webkit-details-marker { display: none; }
+  .pl-list { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 6px 14px; } .pt { display: flex; align-items: center; gap: 8px; padding: 9px 0; border-top: 1px solid var(--line); } .pt:first-child { border-top: 0; } .pt.cur { background: var(--accent-soft); margin: 0 -14px; padding: 9px 14px; }
+  .pt .pn { flex: 1; min-width: 0; text-align: left; background: none; border: 0; padding: 4px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; } .pt.cur .pn { color: var(--accent); } .pt small { color: var(--ink2); font-size: 12px; } .pt input { width: 20px; height: 20px; accent-color: var(--accent); }
+  .scrim { position: fixed; inset: 0; background: rgba(20, 22, 30, .45); display: flex; align-items: flex-end; justify-content: center; z-index: 50; }
+  .sheet { background: var(--card); width: 100%; max-width: 540px; max-height: 94%; overflow-y: auto; border-radius: 20px 20px 0 0; padding: 20px max(18px, env(safe-area-inset-left, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)); display: flex; flex-direction: column; gap: 14px; } .sheet h2 { margin: 0; font-size: 18px; }
+  .sheet-f { display: flex; gap: 8px; flex-wrap: wrap; } .sheet-f .sp { flex: 1; } .msg { font-size: 13px; color: var(--warn); margin: 0; min-height: 18px; }
+  .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #1a1b1f; color: #fff; padding: 11px 16px; border-radius: 12px; font-size: 13.5px; max-width: min(92vw, 520px); z-index: 80; text-align: center; }
+  @media (min-width: 700px) { .scrim { align-items: center; } .sheet { border-radius: 20px; } }
+</style>
+</head>
+<body>
+<div class="wrap" id="root"></div>
+<div class="player" id="player" hidden></div>
+<div class="scrim" id="scrim" hidden><div class="sheet" id="sheet" role="dialog" aria-modal="true"></div></div>
+<div class="toast" id="toast" role="status" hidden></div>
+<audio id="au" preload="auto"></audio>
+<input type="file" id="fi" accept="audio/*,.mp3,.m4a,.wav,.ogg" multiple hidden>
+<script>
+(function () {
+  'use strict';
+  var KEY = 'training-check-v1';
+  var DOW = ['일', '월', '화', '수', '목', '금', '토'];
+  var $ = function (s) { return document.querySelector(s); };
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
+  var pad = function (n) { return String(n).padStart(2, '0'); };
+  var keyOf = function (d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+  var todayKey = function () { return keyOf(new Date()); };
+  var parseKey = function (k) { var p = k.split('-').map(Number); return new Date(p[0], p[1] - 1, p[2], 12); };
+  var addDays = function (k, n) { var d = parseKey(k); d.setDate(d.getDate() + n); return keyOf(d); };
+  var isDate = function (s) { return /^\d{4}-\d{2}-\d{2}$/.test(s || ''); };
+  var uid = function () { return 'f' + Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-3); };
+  var clone = function (o) { return JSON.parse(JSON.stringify(o)); };
+  var cInt = function (v, a, b, d) { v = Math.round(+v); return isFinite(v) && v >= a && v <= b ? v : d; };
+  var cNum = function (v, a, b, d) { v = +v; return isFinite(v) && v >= a && v <= b ? v : d; };
+  var fmt = function (s) { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ':' + pad(s % 60); };
+  var fmtLong = function (sec) { var m = Math.round(sec / 60); if (m < 60) return m + '분'; return Math.floor(m / 60) + '시간 ' + (m % 60) + '분'; };
+  var natural = function (a, b) { return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }); };
+
+  /* ---------- 상태 ---------- */
+  var DEF = { rep: 2, gap: 'len', rate: 1, sub: 'show', lang: 'both', marked: false, goal: 20, loop: false };
+  function normalize(j) {
+    j = j || {}; var st = j.settings || {}, out = { v: 1, updatedAt: +j.updatedAt || 0, sets: [], logs: {}, recent: [] };
+    out.settings = {
+      rep: cInt(st.rep, 1, 50, DEF.rep), gap: ['none', 'len', '2', '5'].indexOf(st.gap) >= 0 ? st.gap : DEF.gap, rate: cNum(st.rate, 0.5, 2, 1),
+      sub: ['show', 'part', 'hide'].indexOf(st.sub) >= 0 ? st.sub : 'show', lang: ['both', 'en', 'ko'].indexOf(st.lang) >= 0 ? st.lang : 'both',
+      marked: !!st.marked, goal: cInt(st.goal, 1, 600, DEF.goal), loop: !!st.loop
+    };
+    (Array.isArray(j.sets) ? j.sets : []).slice(0, 100).forEach(function (s) {
+      if (!s || typeof s !== 'object') return;
+      var tracks = (Array.isArray(s.tracks) ? s.tracks : []).slice(0, 600).map(function (t) {
+        if (!t || !t.fid) return null;
+        var start = cNum(t.start, 0, 86400, 0), end = cNum(t.end, 0, 86400, 0), dur = cNum(t.dur, 0, 86400, 0);
+        return { id: String(t.id || uid()), fid: String(t.fid), fname: String(t.fname || '').slice(0, 160), fsize: +t.fsize || 0, name: String(t.name || '').slice(0, 120), start: start, end: end > start ? end : 0, dur: dur, mark: !!t.mark, text: String(t.text || '').slice(0, 4000), split: !!t.split };
+      }).filter(Boolean);
+      out.sets.push({ id: String(s.id || uid()), name: String(s.name || '이름 없는 자료').slice(0, 80), fav: !!s.fav, at: +s.at || 0, last: cInt(s.last, 0, 599, 0), tracks: tracks });
+    });
+    Object.keys(j.logs || {}).sort().slice(-800).forEach(function (d) { var l = j.logs[d]; if (isDate(d) && l) out.logs[d] = { sec: Math.max(0, Math.round(+l.sec || 0)), rep: Math.max(0, Math.round(+l.rep || 0)) }; });
+    (Array.isArray(j.recent) ? j.recent : []).slice(0, 10).forEach(function (r) { if (r && r.setId) out.recent.push({ setId: String(r.setId), idx: cInt(r.idx, 0, 599, 0), at: +r.at || 0 }); });
+    return out;
+  }
+  function readLocal() { try { var raw = localStorage.getItem(KEY); if (raw) return normalize(JSON.parse(raw)); } catch (e) {} return normalize(null); }
+  function writeLocal() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+  var state = readLocal(), tab = 'home', viewSet = '', have = {}, importTarget = '', sheet = null;
+
+  /* ---------- 저장·동기화 (허브가 저장소를 중계). 소리 파일은 이 기기에만 저장하고, 자료 목록·기록은 계정에 저장한다 ---------- */
+  var CL = window.__hubClaude || window.claude, remote = null, pushTimer = 0, pushing = false, dirty = false, savedKind = 'local';
+  function setSaved() { var el = $('#saved'); if (!el) return; el.className = 'saved' + (savedKind === 'busy' ? ' busy' : savedKind === 'local' ? ' local' : ''); el.textContent = savedKind === 'busy' ? '저장 중…' : savedKind === 'local' ? '이 기기에만 저장됨' : '저장됨'; }
+  function schedulePush() { if (!remote) return; dirty = true; savedKind = 'busy'; setSaved(); clearTimeout(pushTimer); pushTimer = setTimeout(push, 700); }
+  async function push() {
+    if (pushing) { pushTimer = setTimeout(push, 400); return; }
+    if (!dirty || !remote) return;
+    pushing = true; dirty = false;
+    try { await remote.set(clone(state)); if (!dirty) { savedKind = 'ok'; setSaved(); } } catch (e) { savedKind = 'local'; setSaved(); }
+    pushing = false; if (dirty) schedulePush();
+  }
+  async function initRemote() {
+    try {
+      if (!CL || !CL.use) return;
+      var db = await CL.use('db'), user = await CL.use('user'); if (!db || !user) return;
+      var id = await user.id(); if (!id) return;
+      remote = db.doc('data/users/' + id + '/training-check');
+      var snap = await remote.get();
+      if (snap.exists) {
+        var r = normalize(clone(snap.data()));
+        if (r.updatedAt > state.updatedAt) { state = r; writeLocal(); savedKind = 'ok'; refreshHave().then(render); }
+        else if (r.updatedAt < state.updatedAt) schedulePush(); else { savedKind = 'ok'; setSaved(); }
+      } else if (state.updatedAt > 0) schedulePush(); else { savedKind = 'ok'; setSaved(); }
+      report(todayKey());
+    } catch (e) { remote = null; }
+  }
+  /* 그날 훈련한 시간(분)을 허브에 알려 주면, 루틴이 그 수치로 자동 체크한다(횟수는 이 도구의 기록에 남는다) */
+  function minutesOf(d) { var l = state.logs[d]; return l ? Math.round(l.sec / 60) : 0; }
+  function report(d) { try { if (window.__hubReport) window.__hubReport({ date: d, value: minutesOf(d) }); } catch (e) {} }
+  function commit(rerender) { state.updatedAt = Date.now(); writeLocal(); schedulePush(); if (rerender !== false) render(); report(todayKey()); }
+  var toastT = 0;
+  function toast(m, ms) { var el = $('#toast'); el.textContent = m; el.hidden = false; clearTimeout(toastT); toastT = setTimeout(function () { el.hidden = true; }, ms || 3200); }
+
+  /* ---------- 소리 파일 저장(IndexedDB, 이 기기 전용) ---------- */
+  var adb = {
+    db: null,
+    open: function () {
+      if (this.db) return this.db;
+      this.db = new Promise(function (res, rej) { var r = indexedDB.open('training-audio', 1); r.onupgradeneeded = function () { r.result.createObjectStore('f', { keyPath: 'id' }); }; r.onsuccess = function () { res(r.result); }; r.onerror = function () { rej(r.error); }; });
+      return this.db;
+    },
+    put: async function (rec) { var db = await this.open(); return new Promise(function (res, rej) { var tx = db.transaction('f', 'readwrite'); tx.objectStore('f').put(rec); tx.oncomplete = function () { res(true); }; tx.onerror = tx.onabort = function () { rej(tx.error || new Error('저장 공간이 부족해요')); }; }); },
+    get: async function (id) { try { var db = await this.open(); return await new Promise(function (res) { var q = db.transaction('f').objectStore('f').get(id); q.onsuccess = function () { res(q.result || null); }; q.onerror = function () { res(null); }; }); } catch (e) { return null; } },
+    del: async function (id) { try { var db = await this.open(); await new Promise(function (res) { var tx = db.transaction('f', 'readwrite'); tx.objectStore('f').delete(id); tx.oncomplete = tx.onerror = tx.onabort = function () { res(); }; }); } catch (e) {} },
+    keys: async function () { try { var db = await this.open(); return await new Promise(function (res) { var q = db.transaction('f').objectStore('f').getAllKeys(); q.onsuccess = function () { res(q.result || []); }; q.onerror = function () { res([]); }; }); } catch (e) { return []; } },
+    clear: async function () { try { var db = await this.open(); await new Promise(function (res) { var tx = db.transaction('f', 'readwrite'); tx.objectStore('f').clear(); tx.oncomplete = tx.onerror = tx.onabort = function () { res(); }; }); } catch (e) {} }
+  };
+  async function refreshHave() { have = {}; (await adb.keys()).forEach(function (k) { have[k] = 1; }); }
+
+  /* ---------- mp3 정보 읽기: 길이, 그리고 mp3에 들어 있는 가사(자막)가 있으면 함께 ---------- */
+  function decodeText(bytes, enc) {
+    try {
+      if (enc === 1 || enc === 2) { var le = true, i = 0; if (bytes[0] === 0xFE && bytes[1] === 0xFF) { le = false; i = 2; } else if (bytes[0] === 0xFF && bytes[1] === 0xFE) i = 2; else if (enc === 2) le = false; return new TextDecoder(le ? 'utf-16le' : 'utf-16be').decode(bytes.subarray(i)); }
+      if (enc === 3) return new TextDecoder('utf-8').decode(bytes);
+      var hi = false; for (var k = 0; k < bytes.length; k++) if (bytes[k] > 0x7f) { hi = true; break; }
+      return new TextDecoder(hi ? 'euc-kr' : 'latin1').decode(bytes);
+    } catch (e) { return ''; }
+  }
+  function id3Lyrics(buf) {
+    try {
+      var b = new Uint8Array(buf); if (b.length < 10 || b[0] !== 0x49 || b[1] !== 0x44 || b[2] !== 0x33) return '';
+      var ver = b[3], size = ((b[6] & 0x7f) << 21) | ((b[7] & 0x7f) << 14) | ((b[8] & 0x7f) << 7) | (b[9] & 0x7f), p = 10, end = Math.min(b.length, 10 + size);
+      if (ver < 3) return '';
+      while (p + 10 < end) {
+        var id = String.fromCharCode(b[p], b[p + 1], b[p + 2], b[p + 3]); if (!/^[A-Z0-9]{4}$/.test(id)) break;
+        var fs = ver === 4 ? ((b[p + 4] & 0x7f) << 21) | ((b[p + 5] & 0x7f) << 14) | ((b[p + 6] & 0x7f) << 7) | (b[p + 7] & 0x7f) : (b[p + 4] * 16777216) + (b[p + 5] << 16) + (b[p + 6] << 8) + b[p + 7];
+        var body = b.subarray(p + 10, p + 10 + fs);
+        if (id === 'USLT' && body.length > 5) {
+          var enc = body[0], q = 4, wide = enc === 1 || enc === 2;
+          if (wide) { while (q + 1 < body.length && !(body[q] === 0 && body[q + 1] === 0)) q += 2; q += 2; } else { while (q < body.length && body[q] !== 0) q++; q += 1; }
+          var t = decodeText(body.subarray(q), enc).replace(/\r\n?/g, '\n').replace(/\u0000/g, '').trim();
+          if (t) return t.slice(0, 4000);
+        }
+        if (fs <= 0) break; p += 10 + fs;
+      }
+    } catch (e) {}
+    return '';
+  }
+  function audioDuration(file) {
+    return new Promise(function (res) {
+      var a = new Audio(), u = URL.createObjectURL(file), done = false;
+      var fin = function (v) { if (done) return; done = true; clearTimeout(tm); try { URL.revokeObjectURL(u); } catch (e) {} res(v); };
+      var tm = setTimeout(function () { fin(0); }, 9000);
+      a.preload = 'metadata'; a.onloadedmetadata = function () { fin(isFinite(a.duration) ? a.duration : 0); }; a.onerror = function () { fin(0); }; a.src = u;
+    });
+  }
+
+  /* ---------- 파일 가져오기 ---------- */
+  var baseName = function (n) { return String(n).replace(/\.[^.]+$/, ''); };
+  function commonName(names) {
+    if (!names.length) return '새 훈련 자료';
+    var a = baseName(names[0]), n = a.length; names.forEach(function (x) { x = baseName(x); var i = 0; while (i < n && i < x.length && a[i] === x[i]) i++; n = i; });
+    var p = a.slice(0, n).replace(/[\s_\-.\d]+$/, '').trim();
+    return p.length >= 2 ? p : baseName(names[0]);
+  }
+  async function importFiles(fileList, targetId) {
+    var files = Array.prototype.slice.call(fileList || []).filter(function (f) { return /^audio\//.test(f.type) || /\.(mp3|m4a|aac|wav|ogg|opus)$/i.test(f.name); });
+    if (!files.length) { toast('mp3 파일을 골라 주세요.'); return; }
+    files.sort(natural);
+    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {} // 저장 공간이 부족해도 브라우저가 파일을 함부로 지우지 않게 요청한다
+    var set = targetId ? state.sets.filter(function (s) { return s.id === targetId; })[0] : null, added = [], failed = 0;
+    for (var i = 0; i < files.length; i++) {
+      toast('파일 ' + (i + 1) + '/' + files.length + '을 저장하는 중…', 60000);
+      var f = files[i], fid = uid();
+      try {
+        await adb.put({ id: fid, name: f.name, size: f.size, type: f.type || 'audio/mpeg', blob: f, t: Date.now() });
+        var dur = await audioDuration(f), text = '';
+        try { text = id3Lyrics(await f.slice(0, 600000).arrayBuffer()); } catch (e) {}
+        have[fid] = 1;
+        added.push({ id: uid(), fid: fid, fname: f.name, fsize: f.size, name: baseName(f.name).slice(0, 120), start: 0, end: 0, dur: dur, mark: false, text: text, split: false });
+      } catch (e) { failed++; }
+    }
+    if (!added.length) { toast('저장하지 못했어요. 이 기기의 저장 공간을 확인해 주세요.', 5000); return; }
+    if (!set) { set = { id: uid(), name: commonName(files.map(function (f) { return f.name; })).slice(0, 80), fav: false, at: 0, last: 0, tracks: [] }; state.sets.unshift(set); }
+    set.tracks = set.tracks.concat(added).slice(0, 600);
+    commit(); viewSet = set.id; tab = 'lib'; render();
+    var withText = added.filter(function (t) { return t.text; }).length;
+    toast(added.length + '개 문단을 추가했어요.' + (withText ? ' (자막 ' + withText + '개를 mp3에서 읽었어요)' : '') + (failed ? ' ' + failed + '개는 실패했어요.' : ''), 5000);
+  }
+  $('#fi').addEventListener('change', function (e) { var fl = e.target.files; importFiles(fl, importTarget); e.target.value = ''; });
+  function pickFiles(targetId) { importTarget = targetId || ''; $('#fi').click(); }
+  // 다른 기기에서 만든 자료: 같은 이름·크기의 파일을 이 기기에서 다시 고르면 이어 붙인다
+  async function relink(fileList, set) {
+    var files = Array.prototype.slice.call(fileList || []), n = 0;
+    for (var i = 0; i < set.tracks.length; i++) {
+      var t = set.tracks[i]; if (have[t.fid]) continue;
+      var f = files.filter(function (x) { return x.name === t.fname && x.size === t.fsize; })[0] || files.filter(function (x) { return x.name === t.fname; })[0]; if (!f) continue;
+      try { await adb.put({ id: t.fid, name: f.name, size: f.size, type: f.type || 'audio/mpeg', blob: f, t: Date.now() }); have[t.fid] = 1; n++; } catch (e) {}
+    }
+    toast(n ? n + '개 파일을 연결했어요.' : '같은 이름의 파일을 찾지 못했어요. 파일 이름이 같아야 해요.', 4500); render();
+  }
+
+  /* ---------- 긴 파일을 문장 단위로 나누기: 쉬는 구간(무음)을 찾아 자른다 ---------- */
+  async function findSegments(blob, minSil) {
+    var AC = window.AudioContext || window.webkitAudioContext, ctx = new AC();
+    try {
+      var buf = await ctx.decodeAudioData(await blob.arrayBuffer()), ch = buf.getChannelData(0), sr = buf.sampleRate, fl = Math.round(sr * 0.02), n = Math.floor(ch.length / fl), db = new Float32Array(n);
+      for (var i = 0; i < n; i++) { var s = 0; for (var k = i * fl; k < (i + 1) * fl; k++) s += ch[k] * ch[k]; db[i] = 10 * Math.log10(s / fl + 1e-12); }
+      var sorted = Array.prototype.slice.call(db).sort(function (a, b) { return a - b; }), lo = sorted[Math.floor(n * 0.1)], hi = sorted[Math.floor(n * 0.95)], thr = lo + (hi - lo) * 0.28;
+      var need = Math.max(2, Math.round(minSil / 0.02)), runs = [], start = -1;
+      for (var j = 0; j <= n; j++) { var q = j < n && db[j] < thr; if (q && start < 0) start = j; if (!q && start >= 0) { if (j - start >= need) runs.push([start, j]); start = -1; } }
+      var segs = [], from = 0, dur = buf.duration;
+      runs.forEach(function (r) { var a = from * 0.02, b = r[0] * 0.02; if (b - a >= 0.4) segs.push([a, Math.min(dur, b + 0.12)]); from = r[1]; });
+      if (dur - from * 0.02 >= 0.4) segs.push([from * 0.02, dur]);
+      var merged = []; segs.forEach(function (sg) { var last = merged[merged.length - 1]; if (last && (sg[1] - sg[0] < 1.0 || last[1] - last[0] < 1.0)) last[1] = sg[1]; else merged.push(sg.slice()); });
+      return { segs: merged.map(function (m) { return { start: Math.max(0, Math.round((m[0] - 0.1) * 100) / 100), end: Math.round(m[1] * 100) / 100 }; }), dur: dur };
+    } finally { try { ctx.close(); } catch (e) {} }
+  }
+
+  /* ---------- 플레이어 ---------- */
+  var A = $('#au'), P = { more: false, open: false, setId: '', idx: 0, rep: 0, st: 'idle', gapTimer: 0, gapEnd: 0, gapLeft: 0, gapDur: 0, poll: 0, tick: 0, unsaved: 0, url: '', urlFid: '', wl: null, reveal: false, list: 0 };
+  var curSet = function () { return state.sets.filter(function (s) { return s.id === P.setId; })[0]; };
+  var curTrack = function () { var s = curSet(); return s ? s.tracks[P.idx] : null; };
+  function bounds(t) { var a = t.start || 0, b = t.end > 0 ? t.end : (t.dur > 0 ? a + t.dur : 0); return { a: a, b: b }; }
+  var segLen = function (t) { var b = bounds(t); return b.b > b.a ? b.b - b.a : (t.dur || 0); };
+  function repsFor(t) { return state.settings.marked && !t.mark ? 1 : state.settings.rep; }
+  function gapMs(t) { var g = state.settings.gap; if (g === 'none') return 0; if (g === '2') return 2000; if (g === '5') return 5000; return Math.max(900, Math.round(segLen(t) / state.settings.rate * 1000) + 300); }
+  function addSec() {
+    var d = todayKey(), l = state.logs[d] || (state.logs[d] = { sec: 0, rep: 0 }); l.sec++; P.unsaved++;
+    if (P.unsaved >= 15) flush();
+    var el = $('#pl-today'); if (el) el.textContent = fmtLong(l.sec) + ' · ' + l.rep + '회';
+  }
+  function flush() { P.unsaved = 0; var s = curSet(); if (s) { s.last = P.idx; s.at = Date.now(); touchRecent(s); } var ks = Object.keys(state.logs).sort(); while (ks.length > 800) delete state.logs[ks.shift()]; commit(false); }
+  function touchRecent(s) { state.recent = state.recent.filter(function (r) { return r.setId !== s.id; }); state.recent.unshift({ setId: s.id, idx: P.idx, at: Date.now() }); state.recent = state.recent.slice(0, 10); }
+  function startTick() { if (P.tick) return; P.tick = setInterval(function () { if (P.st === 'playing' || P.st === 'gap') addSec(); }, 1000); }
+  function stopTick() { clearInterval(P.tick); P.tick = 0; }
+  function startPoll() { stopPoll(); P.poll = setInterval(pollTick, 60); }
+  function stopPoll() { clearInterval(P.poll); P.poll = 0; }
+  function pollTick() {
+    var t = curTrack(); if (!t || P.st !== 'playing') return;
+    var b = bounds(t), pos = A.currentTime, bar = $('#pl-bar');
+    if (bar && b.b > b.a) bar.style.width = Math.max(0, Math.min(100, (pos - b.a) / (b.b - b.a) * 100)) + '%';
+    if (b.b > 0 && b.b - b.a > 0 && pos >= b.b - 0.04 && t.end > 0) paragraphEnd();
+  }
+  A.addEventListener('ended', function () { if (P.st === 'playing') paragraphEnd(); });
+  async function wake(on) { try { if (on) { if (navigator.wakeLock && !P.wl) { P.wl = await navigator.wakeLock.request('screen'); P.wl.addEventListener('release', function () { P.wl = null; }); } } else if (P.wl) { await P.wl.release(); P.wl = null; } } catch (e) { P.wl = null; } }
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible' && (P.st === 'playing' || P.st === 'gap')) wake(true); });
+  function mediaSession() {
+    try {
+      if (!('mediaSession' in navigator)) return; var s = curSet(), t = curTrack(); if (!s || !t) return;
+      navigator.mediaSession.metadata = new MediaMetadata({ title: t.name, artist: s.name, album: '영어 훈련 플레이어' });
+      var set = function (a, f) { try { navigator.mediaSession.setActionHandler(a, f); } catch (e) {} };
+      set('play', function () { togglePlay(); }); set('pause', function () { togglePlay(); }); set('previoustrack', function () { go(-1); }); set('nexttrack', function () { go(1); });
+    } catch (e) {}
+  }
+  function ready() {
+    return new Promise(function (res) { if (A.readyState >= 1) return res(); var tm = setTimeout(res, 6000); A.addEventListener('loadedmetadata', function f() { A.removeEventListener('loadedmetadata', f); clearTimeout(tm); res(); }); });
+  }
+  async function loadTrack(autoplay) {
+    var t = curTrack(); if (!t) return;
+    stopPoll(); clearTimeout(P.gapTimer); P.gapLeft = 0; try { A.pause(); } catch (e) {}
+    var rec = await adb.get(t.fid);
+    if (!rec) { P.st = 'missing'; drawPlayer(); return; }
+    if (P.urlFid !== t.fid) { if (P.url) URL.revokeObjectURL(P.url); P.url = URL.createObjectURL(rec.blob); P.urlFid = t.fid; A.src = P.url; }
+    await ready();
+    A.playbackRate = state.settings.rate; try { A.preservesPitch = true; } catch (e) {}
+    try { A.currentTime = bounds(t).a; } catch (e) {}
+    P.st = 'paused'; mediaSession();
+    if (autoplay) playNow(); else drawPlayer();
+  }
+  function playNow() {
+    var p; try { A.playbackRate = state.settings.rate; p = A.play(); } catch (e) { p = Promise.reject(e); }
+    return Promise.resolve(p).then(function () { P.st = 'playing'; startPoll(); startTick(); wake(true); drawPlayer(); }).catch(function () { P.st = 'paused'; drawPlayer(); toast('재생하지 못했어요. ▶ 버튼을 눌러 주세요.'); });
+  }
+  function paragraphEnd() {
+    stopPoll(); try { A.pause(); } catch (e) {}
+    var t = curTrack(); if (!t) return;
+    var d = todayKey(), l = state.logs[d] || (state.logs[d] = { sec: 0, rep: 0 }); l.rep++;
+    P.rep++; flush();
+    P.st = 'gap'; P.gapDur = gapMs(t); P.gapEnd = Date.now() + P.gapDur; drawPlayer();
+    clearTimeout(P.gapTimer); P.gapTimer = setTimeout(afterGap, P.gapDur);
+  }
+  function afterGap() {
+    var t = curTrack(); if (!t) return; P.gapLeft = 0;
+    if (P.rep < repsFor(t)) { try { A.currentTime = bounds(t).a; } catch (e) {} playNow(); return; }
+    var s = curSet();
+    if (P.idx < s.tracks.length - 1) { P.idx++; P.rep = 0; loadTrack(true); }
+    else if (state.settings.loop) { P.idx = 0; P.rep = 0; loadTrack(true); }
+    else { P.st = 'done'; stopTick(); wake(false); flush(); drawPlayer(); toast('이 자료를 끝까지 훈련했어요!'); }
+  }
+  function togglePlay() {
+    if (P.st === 'playing') { try { A.pause(); } catch (e) {} stopPoll(); P.st = 'paused'; wake(false); flush(); drawPlayer(); }
+    else if (P.st === 'gap') { clearTimeout(P.gapTimer); P.gapLeft = Math.max(0, P.gapEnd - Date.now()); P.st = 'pausedgap'; wake(false); flush(); drawPlayer(); }
+    else if (P.st === 'pausedgap') { P.st = 'gap'; P.gapEnd = Date.now() + P.gapLeft; P.gapDur = P.gapLeft; clearTimeout(P.gapTimer); P.gapTimer = setTimeout(afterGap, P.gapLeft); wake(true); startTick(); drawPlayer(); }
+    else if (P.st === 'paused' || P.st === 'idle') { wake(true); startTick(); playNow(); }
+    else if (P.st === 'done') { P.idx = 0; P.rep = 0; loadTrack(true); }
+  }
+  function go(d) {
+    var s = curSet(); if (!s) return; var i = Math.max(0, Math.min(s.tracks.length - 1, P.idx + d));
+    var was = P.st === 'playing' || P.st === 'gap'; P.idx = i; P.rep = 0; P.reveal = false; loadTrack(was || P.st === 'done');
+  }
+  function restartPar() { var t = curTrack(); if (!t) return; var was = P.st === 'playing' || P.st === 'gap'; P.rep = 0; clearTimeout(P.gapTimer); try { A.currentTime = bounds(t).a; } catch (e) {} if (was || P.st === 'paused') { wake(true); startTick(); playNow(); } }
+  function openPlayer(setId, idx) {
+    var s = state.sets.filter(function (x) { return x.id === setId; })[0]; if (!s || !s.tracks.length) return;
+    if (P.open && P.setId !== setId) closePlayer(true);
+    P.open = true; P.setId = setId; P.idx = Math.max(0, Math.min(s.tracks.length - 1, idx == null ? s.last : idx)); P.rep = 0; P.reveal = false;
+    $('#player').hidden = false; document.body.style.overflow = 'hidden'; P.st = 'paused'; drawPlayer(); loadTrack(false);
+  }
+  function closePlayer(silent) {
+    stopPoll(); clearTimeout(P.gapTimer); try { A.pause(); } catch (e) {} stopTick(); wake(false);
+    if (P.setId) flush();
+    P.open = false; P.st = 'idle'; $('#player').hidden = true; document.body.style.overflow = ''; if (!silent) render();
+  }
+  function subText(t) {
+    var txt = t.text || '', lang = state.settings.lang;
+    if (!txt) return '';
+    if (lang !== 'both') txt = txt.split('\n').filter(function (l) { var ko = /[가-힣]/.test(l); return lang === 'ko' ? ko : !ko; }).join('\n');
+    return txt.trim();
+  }
+  function drawPlayer() {
+    if (!P.open) return;
+    var s = curSet(), t = curTrack(); if (!s || !t) return;
+    var cfg = state.settings, sub = subText(t), mode = cfg.sub, sc = $('.player') ? $('.player').scrollTop : 0, lst = $('#pl-list') ? $('#pl-list').scrollTop : 0;
+    var shown = '', cls = 'pl-sub';
+    if (!t.text) { shown = '자막이 없어요. 아래 “자막 입력”으로 넣을 수 있어요.'; cls += ' dim'; }
+    else if (!sub) { shown = '선택한 언어의 자막이 없어요.'; cls += ' dim'; }
+    else if (mode === 'hide' && !P.reveal) { shown = '자막을 가렸어요. 눌러서 보기'; cls += ' dim hide'; }
+    else if (mode === 'part' && !P.reveal) { shown = sub.split(/\s+/).slice(0, 3).join(' ') + ' …'; cls += ' hide'; }
+    else shown = sub;
+    var stTxt = P.st === 'playing' ? '<b>듣는 중</b>' : P.st === 'gap' ? '<b>따라 말해 보세요</b>' : P.st === 'missing' ? '<b style="color:var(--warn)">이 기기에 파일이 없어요</b>' : P.st === 'done' ? '<b>끝까지 훈련했어요</b>' : '<b style="color:var(--ink2)">멈춤</b>';
+    var playing = P.st === 'playing' || P.st === 'gap';
+    var d = todayKey(), l = state.logs[d] || { sec: 0, rep: 0 }, n = repsFor(t);
+    var chips = [1, 2, 5, 10].map(function (x) { return '<button type="button" class="chip" data-act="rep" data-n="' + x + '" aria-pressed="' + (cfg.rep === x) + '">' + x + '회</button>'; }).join('') + (([1, 2, 5, 10].indexOf(cfg.rep) < 0) ? '<button type="button" class="chip" aria-pressed="true">' + cfg.rep + '회</button>' : '') + '<button type="button" class="chip" data-act="rep-custom">직접</button>';
+    var h = '<div class="pl"><div class="pl-top"><button type="button" class="btn sm" data-act="pl-close">← 자료</button><div class="pl-ti"><b>' + esc(s.name) + '</b><small>' + (P.idx + 1) + ' / ' + s.tracks.length + ' 문단 · ' + esc(t.name) + '</small></div><button type="button" class="btn sm" data-act="fav" data-id="' + s.id + '" aria-label="즐겨찾기">' + (s.fav ? '★' : '☆') + '</button></div>' +
+      '<div class="' + cls + '" data-act="reveal">' + esc(shown) + '</div>' +
+      '<div class="pl-st' + (P.st === 'gap' ? ' gap' : '') + '"><span>' + stTxt + ' · <span class="num">' + Math.min(P.rep + (P.st === 'playing' ? 1 : 0), n) + ' / ' + n + '회</span></span><span class="num" id="pl-today">오늘 ' + fmtLong(l.sec) + ' · ' + l.rep + '회</span></div>' +
+      '<div class="bar"><i id="pl-bar"></i></div>' +
+      '<div class="pl-ctrl"><button type="button" class="cbtn" data-act="prev" aria-label="이전 문단">⏮</button><button type="button" class="cbtn" data-act="restart" aria-label="문단 다시 시작">↺</button><button type="button" class="cbtn big" data-act="play" aria-label="' + (playing ? '일시정지' : '재생') + '">' + (playing ? '❚❚' : '▶') + '</button><button type="button" class="cbtn" data-act="next" aria-label="다음 문단">⏭</button></div>' +
+      '<div class="pl-opt"><div class="row"><span class="lb">반복</span><div class="chips">' + chips + '</div></div>' +
+      '<details id="pl-more"' + (P.more ? ' open' : '') + '><summary>간격 · 속도 · 자막 · 반복 방식</summary><div style="display:flex;flex-direction:column;gap:12px;margin-top:12px">' +
+      '<div class="row"><span class="lb">간격</span><select data-sel="gap" aria-label="따라 말하는 간격">' + [['none', '없음'], ['len', '문단 길이만큼'], ['2', '2초'], ['5', '5초']].map(function (o) { return '<option value="' + o[0] + '"' + (cfg.gap === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select><span class="lb" style="min-width:0">속도</span><select data-sel="rate" aria-label="재생 속도">' + [0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5].map(function (v) { return '<option value="' + v + '"' + (cfg.rate === v ? ' selected' : '') + '>' + v + '배</option>'; }).join('') + '</select></div>' +
+      '<div class="row"><span class="lb">자막</span><select data-sel="sub" aria-label="자막 보기">' + [['show', '전체 보기'], ['part', '일부만 보기'], ['hide', '전체 가리기']].map(function (o) { return '<option value="' + o[0] + '"' + (cfg.sub === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select><select data-sel="lang" aria-label="자막 언어">' + [['both', '한글/영어'], ['en', '영어'], ['ko', '한글']].map(function (o) { return '<option value="' + o[0] + '"' + (cfg.lang === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select><button type="button" class="btn sm" data-act="edit-text">✎ 자막 입력</button></div>' +
+      '<label class="chk"><input type="checkbox" data-chk="marked"' + (cfg.marked ? ' checked' : '') + '><span>표시(✓)한 문단만 반복하고, 나머지는 한 번만 들어요</span></label>' +
+      '<label class="chk"><input type="checkbox" data-chk="loop"' + (cfg.loop ? ' checked' : '') + '><span>끝까지 가면 처음부터 다시</span></label></div></details></div>' +
+      '<div class="pl-list" id="pl-list">' + s.tracks.map(function (x, i) { return '<div class="pt' + (i === P.idx ? ' cur' : '') + '"><input type="checkbox" data-mark="' + i + '"' + (x.mark ? ' checked' : '') + ' aria-label="반복 표시"><button type="button" class="pn" data-act="jump" data-i="' + i + '">' + (i + 1) + '. ' + esc(x.name) + (have[x.fid] ? '' : ' ⚠') + '</button><small class="num">' + fmt(segLen(x)) + '</small></div>'; }).join('') + '</div></div>';
+    $('#player').innerHTML = h;
+    var ply = $('.player'); if (ply) ply.scrollTop = sc; var ll = $('#pl-list'); if (ll) ll.scrollTop = lst;
+    if (P.st === 'gap') { var bar = $('#pl-bar'); if (bar) { bar.style.transition = 'none'; bar.style.width = '0%'; void bar.offsetWidth; bar.style.transition = 'width ' + (P.gapDur / 1000) + 's linear'; bar.style.width = '100%'; } }
+  }
+  $('#player').addEventListener('click', function (e) {
+    var t = e.target.closest('[data-act]'); if (!t) return; var a = t.dataset.act;
+    if (a === 'pl-close') closePlayer(); else if (a === 'play') togglePlay(); else if (a === 'prev') go(-1); else if (a === 'next') go(1); else if (a === 'restart') restartPar();
+    else if (a === 'jump') { var was = P.st === 'playing' || P.st === 'gap'; P.idx = +t.dataset.i; P.rep = 0; P.reveal = false; loadTrack(was || P.st === 'done'); }
+    else if (a === 'reveal') { P.reveal = !P.reveal; drawPlayer(); }
+    else if (a === 'rep') { state.settings.rep = +t.dataset.n; commit(false); drawPlayer(); }
+    else if (a === 'rep-custom') { openSheet({ type: 'rep' }); }
+    else if (a === 'edit-text') { var ct = curTrack(); if (ct) openSheet({ type: 'text', setId: P.setId, tid: ct.id }); }
+    else if (a === 'fav') { var s = curSet(); if (s) { s.fav = !s.fav; commit(false); drawPlayer(); } }
+  });
+  $('#player').addEventListener('toggle', function (e) { if (e.target && e.target.id === 'pl-more') P.more = e.target.open; }, true);
+  $('#player').addEventListener('change', function (e) {
+    var el = e.target, s = curSet();
+    if (el.dataset.sel) { var k = el.dataset.sel, v = el.value; state.settings[k] = k === 'rate' ? +v : v; commit(false); if (k === 'rate') { try { A.playbackRate = state.settings.rate; } catch (x) {} } drawPlayer(); }
+    else if (el.dataset.chk) { state.settings[el.dataset.chk] = el.checked; commit(false); drawPlayer(); }
+    else if (el.dataset.mark != null && s) { s.tracks[+el.dataset.mark].mark = el.checked; commit(false); }
+  });
+
+  /* ---------- 시트 ---------- */
+  function openSheet(s) { sheet = s; drawSheet(); $('#scrim').hidden = false; }
+  function closeSheet() { sheet = null; $('#scrim').hidden = true; }
+  function setById(id) { return state.sets.filter(function (x) { return x.id === id; })[0]; }
+  function drawSheet() {
+    var s = sheet, h = '';
+    if (s.type === 'rep') h = '<h2>반복 횟수</h2><div class="field"><span class="lb">문단마다 몇 번 반복할까요?</span><input type="number" id="sh-n" min="1" max="50" step="1" inputmode="numeric" value="' + state.settings.rep + '"></div><p class="msg" id="sh-msg"></p><div class="sheet-f"><button type="button" class="btn primary" data-sh="rep-ok">확인</button><button type="button" class="btn" data-sh="close">취소</button></div>';
+    else if (s.type === 'rename') h = '<h2>자료 이름</h2><div class="field"><input type="text" id="sh-name" maxlength="80" value="' + esc((setById(s.id) || {}).name || '') + '"></div><div class="sheet-f"><button type="button" class="btn primary" data-sh="rename-ok">저장</button><button type="button" class="btn" data-sh="close">취소</button></div>';
+    else if (s.type === 'text') { var st = setById(s.setId), tr = st && st.tracks.filter(function (x) { return x.id === s.tid; })[0]; h = '<h2>자막 입력</h2><p class="help">' + esc(tr ? tr.name : '') + ' · 영어와 한글을 줄을 나눠 적으면 “영어만 / 한글만” 보기가 돼요.</p><textarea id="sh-text" rows="8" maxlength="4000" placeholder="영어 문장&#10;한글 뜻">' + esc(tr ? tr.text : '') + '</textarea><div class="sheet-f"><button type="button" class="btn primary" data-sh="text-ok">저장</button><button type="button" class="btn" data-sh="close">취소</button></div>'; }
+    else if (s.type === 'confirm') h = '<h2>' + esc(s.title) + '</h2><p style="margin:0;line-height:1.6">' + esc(s.msg) + '</p><div class="sheet-f"><button type="button" class="btn danger" data-sh="confirm-ok">' + esc(s.yes || '삭제') + '</button><button type="button" class="btn" data-sh="close">취소</button></div>';
+    else if (s.type === 'split') h = '<h2>문장 단위로 나누기</h2><p class="help">긴 파일에서 말이 쉬는 곳을 찾아 문단으로 나눠요. 파일은 그대로 두고 구간만 나눠요.</p><div class="field"><span class="lb">쉬는 시간이 이 정도 이상이면 나눠요</span><div class="chips">' + [[0.35, '짧게(0.35초)'], [0.6, '보통(0.6초)'], [0.9, '길게(0.9초)']].map(function (o) { return '<button type="button" class="chip" data-sh="split-go" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div></div><p class="msg" id="sh-msg"></p><div class="sheet-f"><button type="button" class="btn" data-sh="close">닫기</button></div>';
+    $('#sheet').innerHTML = h;
+    var f = $('#sh-n') || $('#sh-name') || $('#sh-text'); if (f) setTimeout(function () { try { f.focus(); } catch (e) {} }, 60);
+  }
+  $('#scrim').addEventListener('click', async function (e) {
+    if (e.target.id === 'scrim') { closeSheet(); return; }
+    var b = e.target.closest('[data-sh]'); if (!b || !sheet) return; var a = b.dataset.sh, s = sheet;
+    if (a === 'close') closeSheet();
+    else if (a === 'rep-ok') { var n = Math.round(+$('#sh-n').value); if (!(n >= 1 && n <= 50)) { $('#sh-msg').textContent = '1~50 사이로 적어 주세요.'; return; } state.settings.rep = n; closeSheet(); commit(false); if (P.open) drawPlayer(); else render(); }
+    else if (a === 'rename-ok') { var st = setById(s.id); if (st) { st.name = ($('#sh-name').value.trim() || st.name).slice(0, 80); commit(); } closeSheet(); }
+    else if (a === 'text-ok') { var ss = setById(s.setId), tr = ss && ss.tracks.filter(function (x) { return x.id === s.tid; })[0]; if (tr) { tr.text = $('#sh-text').value.trim().slice(0, 4000); commit(false); } closeSheet(); if (P.open) drawPlayer(); else render(); }
+    else if (a === 'confirm-ok') { var fn = s.onYes; closeSheet(); if (fn) fn(); }
+    else if (a === 'split-go') {
+      var st2 = setById(s.setId), tr2 = st2 && st2.tracks.filter(function (x) { return x.id === s.tid; })[0], msg = $('#sh-msg'); if (!tr2) return;
+      msg.style.color = 'var(--ink2)'; msg.textContent = '소리를 분석하는 중이에요…';
+      try {
+        var rec = await adb.get(tr2.fid); if (!rec) { msg.style.color = 'var(--warn)'; msg.textContent = '이 기기에 파일이 없어요.'; return; }
+        var r = await findSegments(rec.blob, +b.dataset.v);
+        if (r.segs.length < 2) { msg.style.color = 'var(--warn)'; msg.textContent = '나눌 곳을 찾지 못했어요. “짧게”로 다시 해 보세요.'; return; }
+        var idx = st2.tracks.indexOf(tr2), parts = r.segs.map(function (sg, i) { return { id: uid(), fid: tr2.fid, fname: tr2.fname, fsize: tr2.fsize, name: (tr2.name + ' ' + (i + 1)).slice(0, 120), start: sg.start, end: sg.end, dur: sg.end - sg.start, mark: false, text: '', split: true }; });
+        st2.tracks.splice.apply(st2.tracks, [idx, 1].concat(parts)); closeSheet(); commit(); toast(parts.length + '개 문단으로 나눴어요.', 4000);
+      } catch (e2) { msg.style.color = 'var(--warn)'; msg.textContent = '분석하지 못했어요. 파일 형식을 확인해 주세요.'; }
+    }
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !$('#scrim').hidden) closeSheet(); });
+  function confirmBox(title, msg, yes, onYes) { openSheet({ type: 'confirm', title: title, msg: msg, yes: yes, onYes: onYes }); }
+
+  /* ---------- 화면 ---------- */
+  function totals() {
+    var sec = 0, rep = 0, last = ''; Object.keys(state.logs).forEach(function (d) { var l = state.logs[d]; sec += l.sec; rep += l.rep; if (l.sec > 0 && d > last) last = d; });
+    return { sec: sec, rep: rep, last: last };
+  }
+  function streak() { var n = 0, d = todayKey(); if (!(state.logs[d] && state.logs[d].sec > 0)) d = addDays(d, -1); while (state.logs[d] && state.logs[d].sec > 0) { n++; d = addDays(d, -1); } return n; }
+  var setTotal = function (s) { return s.tracks.reduce(function (a, t) { return a + segLen(t); }, 0); };
+  function setCard(s) {
+    var miss = s.tracks.filter(function (t) { return !have[t.fid]; }).length;
+    return '<button type="button" class="setcard" data-act="open-set" data-id="' + s.id + '"><span class="ico" aria-hidden="true">🎧</span><span class="tx"><b>' + (s.fav ? '★ ' : '') + esc(s.name) + '</b><small>' + s.tracks.length + '문단 · ' + fmt(setTotal(s)) + (miss ? ' · ⚠ 파일 ' + miss + '개 없음' : '') + (s.at ? ' · 최근 ' + (new Date(s.at).getMonth() + 1) + '/' + new Date(s.at).getDate() : '') + '</small></span><span class="go" aria-hidden="true">›</span></button>';
+  }
+  function homePane() {
+    var d = todayKey(), l = state.logs[d] || { sec: 0, rep: 0 }, goal = state.settings.goal, pct = Math.min(100, l.sec / (goal * 60) * 100), h = '';
+    h += '<section class="card today"><span class="lb">오늘 훈련</span><div class="row"><div class="cell"><div class="big num">' + Math.round(l.sec / 60) + '<small>분</small></div><span class="help">목표 ' + goal + '분</span></div><div class="cell"><div class="big num">' + l.rep + '<small>회</small></div><span class="help">반복 횟수</span></div><div class="cell"><div class="big num">' + streak() + '<small>일</small></div><span class="help">연속 훈련</span></div></div>' +
+      '<div class="bar' + (pct >= 100 ? ' done' : '') + '"><i style="width:' + pct + '%"></i></div><div class="goalline">' + (pct >= 100 ? '<b>오늘 목표를 채웠어요!</b> 루틴에도 체크돼요.' : '목표까지 <b>' + Math.max(0, goal - Math.round(l.sec / 60)) + '분</b> 남았어요.') + '</div></section>';
+    var rec = state.recent.map(function (r) { return { r: r, s: setById(r.setId) }; }).filter(function (x) { return x.s && x.s.tracks.length; });
+    if (rec.length) { var x = rec[0]; h += '<section class="card"><div class="sec-t"><h2>이어서 훈련</h2><span>' + esc(x.s.name) + ' · ' + (Math.min(x.r.idx, x.s.tracks.length - 1) + 1) + '번째 문단</span></div><button type="button" class="btn primary" style="width:100%;min-height:50px;font-size:15px" data-act="play-set" data-id="' + x.s.id + '" data-i="' + x.r.idx + '">▶ 이어서 훈련하기</button></section>'; }
+    var fav = state.sets.filter(function (s) { return s.fav; });
+    if (fav.length) h += '<section class="card"><div class="sec-t"><h2>즐겨찾기</h2></div><div class="sets">' + fav.map(setCard).join('') + '</div></section>';
+    if (rec.length > 1) h += '<section class="card"><div class="sec-t"><h2>최근 훈련</h2></div><div class="sets">' + rec.slice(1, 5).map(function (x) { return setCard(x.s); }).join('') + '</div></section>';
+    if (!state.sets.length) h += '<section class="card"><div class="empty"><b>훈련 자료가 아직 없어요</b>mp3 파일을 고르면 파일 하나가 한 문단이 돼요. 문단마다 정한 횟수만큼 반복하고, 따라 말할 틈을 줘요.</div><div style="display:flex;justify-content:center"><button type="button" class="btn primary" data-act="add-files">＋ mp3 파일 추가</button></div></section>';
+    return h;
+  }
+  function libPane() {
+    if (viewSet) { var s = setById(viewSet); if (s) return setPane(s); viewSet = ''; }
+    return '<section class="card"><div class="sec-t"><h2>훈련 자료</h2><span>' + state.sets.length + '개</span></div>' + (state.sets.length ? '<div class="sets">' + state.sets.map(setCard).join('') + '</div>' : '<div class="empty"><b>자료가 없어요</b>mp3 파일을 추가해서 시작해요.</div>') + '<div style="margin-top:14px"><button type="button" class="btn primary" data-act="add-files">＋ mp3 파일 추가</button></div><p class="help" style="margin-top:10px">파일은 이 기기에만 저장돼요. 자료 목록과 훈련 기록은 계정에 저장돼서 다른 기기에서도 보여요(그 기기에는 파일을 다시 골라야 해요).</p></section>';
+  }
+  function setPane(s) {
+    var miss = s.tracks.filter(function (t) { return !have[t.fid]; }).length;
+    var h = '<section class="card"><div class="sec-t"><button type="button" class="btn sm" data-act="back-lib">← 자료 목록</button><span>' + s.tracks.length + '문단 · ' + fmt(setTotal(s)) + '</span></div><div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><h2 style="margin:0;font-size:19px;flex:1;min-width:0;overflow-wrap:anywhere">' + esc(s.name) + '</h2><button type="button" class="btn sm" data-act="fav" data-id="' + s.id + '" aria-label="즐겨찾기">' + (s.fav ? '★' : '☆') + '</button></div>';
+    if (miss) h += '<div class="miss">이 기기에 파일이 없는 문단이 ' + miss + '개 있어요. <button type="button" class="linkbtn" data-act="relink" data-id="' + s.id + '">파일 다시 고르기</button> (같은 이름의 mp3를 고르면 연결돼요)</div>';
+    h += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0"><button type="button" class="btn primary" data-act="play-set" data-id="' + s.id + '" data-i="' + s.last + '"' + (s.tracks.length ? '' : ' disabled') + '>▶ 훈련 시작</button><button type="button" class="btn" data-act="add-files-to" data-id="' + s.id + '">＋ 파일 추가</button><button type="button" class="btn" data-act="rename" data-id="' + s.id + '">이름 바꾸기</button></div>';
+    h += '<p class="help" style="margin-bottom:6px">✓ 표시한 문단만 따로 반복할 수 있어요(어려운 문단 표시용).</p>';
+    h += s.tracks.map(function (t, i) {
+      return '<div class="trk"><input type="checkbox" data-mark="' + i + '"' + (t.mark ? ' checked' : '') + ' aria-label="반복 표시"><span class="n">' + (i + 1) + '</span><button type="button" class="nm" data-act="play-set" data-id="' + s.id + '" data-i="' + i + '">' + esc(t.name) + '</button>' + (t.text ? '<span class="tag">자막</span>' : '') + (have[t.fid] ? '' : '<span class="mx">파일 없음</span>') + '<small class="num">' + fmt(segLen(t)) + '</small>' +
+        '<button type="button" class="btn sm" data-act="t-menu" data-i="' + i + '" aria-label="문단 설정">⋯</button></div>';
+    }).join('');
+    h += '<div class="tact"><button type="button" class="btn danger sm" data-act="del-set" data-id="' + s.id + '">이 자료 삭제</button></div></section>';
+    return h;
+  }
+  function logPane() {
+    var t = totals(), h = '<section class="card"><div class="sec-t"><h2>전체 훈련 기록</h2></div><div class="tiles"><div class="tile"><span class="lb">전체 훈련 시간</span><span class="v num">' + fmtLong(t.sec) + '</span></div><div class="tile"><span class="lb">총 반복 횟수</span><span class="v num">' + t.rep + '<small>회</small></span></div><div class="tile"><span class="lb">마지막 훈련</span><span class="v num" style="font-size:16px">' + (t.last ? t.last.slice(5).replace('-', '/') : '-') + '</span></div></div></section>';
+    var days = [], max = 1, d = todayKey();
+    for (var i = 0; i < 14; i++) { var k = addDays(d, -i), l = state.logs[k] || { sec: 0, rep: 0 }; days.push({ k: k, l: l }); if (l.sec > max) max = l.sec; }
+    h += '<section class="card"><div class="sec-t"><h2>최근 14일</h2><span>하루 목표 ' + state.settings.goal + '분</span></div><div class="days">' + days.map(function (x) { var wd = DOW[parseKey(x.k).getDay()]; return '<div class="dayrow"><span>' + x.k.slice(5).replace('-', '/') + ' <small>' + wd + '</small></span><div class="bar' + (x.l.sec >= state.settings.goal * 60 ? ' done' : '') + '"><i style="width:' + (x.l.sec / max * 100) + '%"></i></div><span class="num">' + (x.l.sec ? fmtLong(x.l.sec) + ' · ' + x.l.rep + '회' : '-') + '</span></div>'; }).join('') + '</div></section>';
+    h += '<section class="card"><button type="button" class="btn danger sm" data-act="del-logs">훈련 기록 전체 삭제</button></section>';
+    return h;
+  }
+  function setPaneSettings() {
+    var c = state.settings;
+    var chip = function (key, val, label) { return '<button type="button" class="chip" data-act="cfg" data-k="' + key + '" data-v="' + val + '" aria-pressed="' + (String(c[key]) === String(val)) + '">' + label + '</button>'; };
+    return '<section class="card"><div class="sec-t"><h2>훈련 기본 설정</h2></div>' +
+      '<div class="field"><span class="lb">문단 반복 횟수</span><div class="chips">' + [1, 2, 5, 10].map(function (n) { return chip('rep', n, n + '회'); }).join('') + '<button type="button" class="chip" data-act="rep-custom">직접 (' + c.rep + '회)</button></div></div>' +
+      '<div class="field"><span class="lb">반복 사이 따라 말하는 간격</span><div class="chips">' + [['none', '없음'], ['len', '문단 길이만큼'], ['2', '2초'], ['5', '5초']].map(function (o) { return chip('gap', o[0], o[1]); }).join('') + '</div></div>' +
+      '<div class="field"><span class="lb">재생 속도</span><div class="chips">' + [0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5].map(function (v) { return chip('rate', v, v + '배'); }).join('') + '</div></div>' +
+      '<div class="field"><span class="lb">자막</span><div class="chips">' + [['show', '전체 보기'], ['part', '일부만 보기'], ['hide', '전체 가리기']].map(function (o) { return chip('sub', o[0], o[1]); }).join('') + '</div><div class="chips">' + [['both', '한글/영어'], ['en', '영어'], ['ko', '한글']].map(function (o) { return chip('lang', o[0], o[1]); }).join('') + '</div></div>' +
+      '<div class="field"><span class="lb">하루 훈련 목표(분)</span><input type="number" id="cfg-goal" min="1" max="600" step="1" inputmode="numeric" value="' + c.goal + '" style="width:120px"><span class="help">루틴의 목표 시간은 루틴 화면에서 따로 정해요.</span></div></section>' +
+      '<section class="card"><div class="sec-t"><h2>저장 공간</h2></div><p class="help" id="cfg-store">확인하는 중…</p><div style="margin-top:12px"><button type="button" class="btn danger sm" data-act="clear-audio">이 기기에 저장된 mp3 모두 지우기</button></div></section>';
+  }
+  function render() {
+    var h = '<div class="head"><h1>영어 훈련 플레이어' + (window.APP_VERSION ? ' <span class="ver">v' + esc(window.APP_VERSION) + '</span>' : '') + '</h1><span class="saved" id="saved"></span></div>';
+    h += '<div class="tabs" role="tablist" aria-label="화면">' + [['home', '홈'], ['lib', '자료'], ['log', '기록'], ['cfg', '설정']].map(function (x) { return '<button type="button" role="tab" data-act="tab" data-t="' + x[0] + '" aria-selected="' + (tab === x[0]) + '">' + x[1] + '</button>'; }).join('') + '</div>';
+    h += '<div class="pane">' + (tab === 'home' ? homePane() : tab === 'lib' ? libPane() : tab === 'log' ? logPane() : setPaneSettings()) + '</div>';
+    var keep = window.pageYOffset; $('#root').innerHTML = h; setSaved(); window.scrollTo(0, keep);
+    if (tab === 'cfg') storageInfo();
+  }
+  async function storageInfo() {
+    var el = $('#cfg-store'); if (!el) return;
+    try { var e = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null, n = Object.keys(have).length; el.textContent = '저장된 mp3 ' + n + '개' + (e ? ' · 이 앱이 쓰는 공간 약 ' + Math.round((e.usage || 0) / 1048576) + 'MB (사용 가능 약 ' + Math.round(((e.quota || 0) - (e.usage || 0)) / 1048576) + 'MB)' : ''); } catch (x) { el.textContent = ''; }
+  }
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest('[data-act]'); if (!t || e.target.closest('#player')) return; var a = t.dataset.act, id = t.dataset.id;
+    if (a === 'tab') { tab = t.dataset.t; if (tab !== 'lib') viewSet = ''; render(); window.scrollTo(0, 0); }
+    else if (a === 'add-files') pickFiles('');
+    else if (a === 'add-files-to') pickFiles(id);
+    else if (a === 'open-set') { viewSet = id; tab = 'lib'; render(); window.scrollTo(0, 0); }
+    else if (a === 'back-lib') { viewSet = ''; render(); }
+    else if (a === 'play-set') { openPlayer(id, +t.dataset.i); }
+    else if (a === 'fav') { var s = setById(id); if (s) { s.fav = !s.fav; commit(); } }
+    else if (a === 'rename') openSheet({ type: 'rename', id: id });
+    else if (a === 'relink') { var inp = document.createElement('input'); inp.type = 'file'; inp.multiple = true; inp.accept = 'audio/*,.mp3'; inp.onchange = function () { relink(inp.files, setById(id)); }; inp.click(); }
+    else if (a === 'del-set') { var ds = setById(id); if (ds) confirmBox('자료 삭제', '“' + ds.name + '” 자료와 이 기기에 저장된 mp3를 삭제할까요? 훈련 기록은 남아요.', '삭제', async function () { var fids = {}; ds.tracks.forEach(function (x) { fids[x.fid] = 1; }); state.sets = state.sets.filter(function (x) { return x.id !== id; }); state.recent = state.recent.filter(function (r) { return r.setId !== id; }); var still = {}; state.sets.forEach(function (x) { x.tracks.forEach(function (y) { still[y.fid] = 1; }); }); for (var f in fids) if (!still[f]) { await adb.del(f); delete have[f]; } viewSet = ''; commit(); toast('삭제했어요'); }); }
+    else if (a === 't-menu') { var cs = setById(viewSet), tr = cs && cs.tracks[+t.dataset.i]; if (tr) openSheet({ type: 'tmenu', setId: cs.id, tid: tr.id }); }
+    else if (a === 'cfg') { var k = t.dataset.k, v = t.dataset.v; state.settings[k] = k === 'rate' || k === 'rep' ? +v : v; commit(); }
+    else if (a === 'rep-custom') openSheet({ type: 'rep' });
+    else if (a === 'del-logs') confirmBox('훈련 기록 삭제', '훈련 기록을 전부 지울까요? 되돌릴 수 없어요.', '모두 삭제', function () { state.logs = {}; state.recent = []; commit(); toast('훈련 기록을 지웠어요'); });
+    else if (a === 'clear-audio') confirmBox('mp3 모두 지우기', '이 기기에 저장된 mp3를 모두 지울까요? 자료 목록과 기록은 남고, 훈련하려면 파일을 다시 골라야 해요.', '지우기', async function () { await adb.clear(); have = {}; render(); toast('지웠어요'); });
+  });
+  document.addEventListener('change', function (e) {
+    var el = e.target;
+    if (el.id === 'cfg-goal') { state.settings.goal = cInt(el.value, 1, 600, state.settings.goal); commit(); }
+    else if (el.dataset && el.dataset.mark != null && !e.target.closest('#player')) { var s = setById(viewSet); if (s && s.tracks[+el.dataset.mark]) { s.tracks[+el.dataset.mark].mark = el.checked; commit(false); } }
+  });
+  // 문단 설정(⋯) 시트
+  var oldDraw = drawSheet;
+  drawSheet = function () {
+    if (sheet && sheet.type === 'tmenu') {
+      var st = setById(sheet.setId), tr = st && st.tracks.filter(function (x) { return x.id === sheet.tid; })[0];
+      $('#sheet').innerHTML = '<h2>' + esc(tr ? tr.name : '') + '</h2><div style="display:flex;flex-direction:column;gap:8px"><button type="button" class="btn" data-sh="t-text">자막 입력·수정</button>' + (tr && !tr.split ? '<button type="button" class="btn" data-sh="t-split">문장 단위로 나누기</button>' : '') + (tr && tr.split ? '<button type="button" class="btn" data-sh="t-merge">나눈 문단 합치기</button>' : '') + '<button type="button" class="btn danger" data-sh="t-del">이 문단 삭제</button></div><div class="sheet-f"><button type="button" class="btn" data-sh="close">닫기</button></div>';
+      return;
+    }
+    oldDraw();
+  };
+  $('#scrim').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-sh]'); if (!b || !sheet || sheet.type !== 'tmenu') return; var a = b.dataset.sh, s = sheet, st = setById(s.setId), tr = st && st.tracks.filter(function (x) { return x.id === s.tid; })[0]; if (!tr) return;
+    if (a === 't-text') openSheet({ type: 'text', setId: s.setId, tid: s.tid });
+    else if (a === 't-split') openSheet({ type: 'split', setId: s.setId, tid: s.tid });
+    else if (a === 't-merge') { var fid = tr.fid, first = st.tracks.findIndex(function (x) { return x.fid === fid && x.split; }); st.tracks = st.tracks.filter(function (x) { return !(x.fid === fid && x.split); }); st.tracks.splice(first, 0, { id: uid(), fid: fid, fname: tr.fname, fsize: tr.fsize, name: baseName(tr.fname).slice(0, 120), start: 0, end: 0, dur: 0, mark: false, text: '', split: false }); closeSheet(); fixDuration(st, fid); commit(); toast('하나로 합쳤어요'); }
+    else if (a === 't-del') { var i = st.tracks.indexOf(tr); st.tracks.splice(i, 1); closeSheet(); commit(); toast('문단을 삭제했어요'); }
+  });
+  async function fixDuration(st, fid) { var rec = await adb.get(fid); if (!rec) return; var d = await audioDuration(rec.blob), t = st.tracks.filter(function (x) { return x.fid === fid && !x.split; })[0]; if (t) { t.dur = d; commit(false); render(); } }
+  window.addEventListener('beforeunload', function () { if (P.open && P.setId) { try { var s = curSet(); if (s) s.last = P.idx; writeLocal(); } catch (e) {} } });
+
+  refreshHave().then(function () { render(); initRemote(); report(todayKey()); });
+  render();
+})();
+</script>
+</body>
+</html>

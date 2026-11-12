@@ -4,7 +4,7 @@
 // 버전이 바뀌면(version.js) 보관본 이름도 바뀌어서 새 파일을 새로 받는다. version.js가 없어도 설치는 멈추지 않는다.
 try { importScripts('version.js'); } catch (e) {}
 const V = 'my-tools-v' + (self.APP_VERSION || '2');
-const CORE = ['./', 'version.js', 'index.html', 'backend.js', 'firebase-config.js', 'routine.html', 'bible.html', 'prayer.html', 'verse.html', 'reading.html', 'running.html','planner.html', 'opic.html', 'budget.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'splash.png'];
+const CORE = ['./', 'version.js', 'index.html', 'backend.js', 'firebase-config.js', 'routine.html', 'bible.html', 'prayer.html', 'verse.html', 'reading.html', 'running.html', 'training.html', 'planner.html', 'opic.html', 'budget.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'splash.png'];
 
 self.addEventListener('install', (e) => {
   // 아직 올리지 않은 파일이 있어도 설치가 멈추지 않게, 파일마다 따로 받아 둔다

@@ -176,7 +176,7 @@
 <div class="scrim" id="scrim" hidden><div class="sheet" id="sheet" role="dialog" aria-modal="true"></div></div>
 <div class="toast" id="toast" role="status" hidden></div>
 <audio id="au" preload="auto"></audio>
-<input type="file" id="fi" accept="audio/*,.mp3,.m4a,.wav,.ogg" multiple hidden>
+<input type="file" id="fi" accept="audio/*,.mp3,.m4a,.wav,.ogg,.smi,.sami,.srt,.vtt,.lrc,.txt" multiple hidden>
 <script>
 (function () {
   'use strict';
@@ -244,7 +244,7 @@
       var snap = await remote.get();
       if (snap.exists) {
         var r = normalize(clone(snap.data()));
-        if (r.updatedAt > state.updatedAt) { state = r; writeLocal(); savedKind = 'ok'; refreshHave().then(render); }
+        if (r.updatedAt > state.updatedAt) { state = r; writeLocal(); savedKind = 'ok'; render(); }
         else if (r.updatedAt < state.updatedAt) schedulePush(); else { savedKind = 'ok'; setSaved(); }
       } else if (state.updatedAt > 0) schedulePush(); else { savedKind = 'ok'; setSaved(); }
       report(todayKey());
@@ -257,21 +257,8 @@
   var toastT = 0;
   function toast(m, ms) { var el = $('#toast'); el.textContent = m; el.hidden = false; clearTimeout(toastT); toastT = setTimeout(function () { el.hidden = true; }, ms || 3200); }
 
-  /* ---------- 소리 파일 저장(IndexedDB, 이 기기 전용) ---------- */
-  var adb = {
-    db: null,
-    open: function () {
-      if (this.db) return this.db;
-      this.db = new Promise(function (res, rej) { var r = indexedDB.open('training-audio', 1); r.onupgradeneeded = function () { r.result.createObjectStore('f', { keyPath: 'id' }); }; r.onsuccess = function () { res(r.result); }; r.onerror = function () { rej(r.error); }; });
-      return this.db;
-    },
-    put: async function (rec) { var db = await this.open(); return new Promise(function (res, rej) { var tx = db.transaction('f', 'readwrite'); tx.objectStore('f').put(rec); tx.oncomplete = function () { res(true); }; tx.onerror = tx.onabort = function () { rej(tx.error || new Error('저장 공간이 부족해요')); }; }); },
-    get: async function (id) { try { var db = await this.open(); return await new Promise(function (res) { var q = db.transaction('f').objectStore('f').get(id); q.onsuccess = function () { res(q.result || null); }; q.onerror = function () { res(null); }; }); } catch (e) { return null; } },
-    del: async function (id) { try { var db = await this.open(); await new Promise(function (res) { var tx = db.transaction('f', 'readwrite'); tx.objectStore('f').delete(id); tx.oncomplete = tx.onerror = tx.onabort = function () { res(); }; }); } catch (e) {} },
-    keys: async function () { try { var db = await this.open(); return await new Promise(function (res) { var q = db.transaction('f').objectStore('f').getAllKeys(); q.onsuccess = function () { res(q.result || []); }; q.onerror = function () { res([]); }; }); } catch (e) { return []; } },
-    clear: async function () { try { var db = await this.open(); await new Promise(function (res) { var tx = db.transaction('f', 'readwrite'); tx.objectStore('f').clear(); tx.oncomplete = tx.onerror = tx.onabort = function () { res(); }; }); } catch (e) {} }
-  };
-  async function refreshHave() { have = {}; (await adb.keys()).forEach(function (k) { have[k] = 1; }); }
+  /* ---------- 열어 둔 mp3 파일. 앱 안에 복사해 저장하지 않고, 사용자가 연 파일(이 기기의 파일)을 화면이 열려 있는 동안만 가리킨다 ---------- */
+  var FILES = {}, have = FILES; // 트랙의 fid → File. 다음에 앱을 열면 비어 있고, 훈련할 때 mp3를 다시 열어 연결한다
 
   /* ---------- mp3 정보 읽기: 길이, 그리고 mp3에 들어 있는 가사(자막)가 있으면 함께 ---------- */
   function decodeText(bytes, enc) {
@@ -311,49 +298,149 @@
     });
   }
 
-  /* ---------- 파일 가져오기 ---------- */
+  /* ---------- 자막 파일 읽기(.smi .srt .vtt .lrc .txt). 한국어 자막에 흔한 EUC-KR 글자 깨짐도 처리한다 ---------- */
+  function decodeBuf(buf) {
+    var b = new Uint8Array(buf);
+    if (b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF) return new TextDecoder('utf-8').decode(b.subarray(3));
+    if (b[0] === 0xFF && b[1] === 0xFE) return new TextDecoder('utf-16le').decode(b.subarray(2));
+    if (b[0] === 0xFE && b[1] === 0xFF) return new TextDecoder('utf-16be').decode(b.subarray(2));
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(b); } catch (e) { return new TextDecoder('euc-kr').decode(b); }
+  }
+  var cleanSub = function (s) { return String(s).replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]*>/g, '').replace(/&nbsp;/gi, ' ').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&amp;/gi, '&').replace(/\r/g, '').replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{2,}/g, '\n').trim(); };
+  // 같은 시각의 큐는 한 줄로 합치고, 각 큐의 끝은 다음 큐(또는 빈 자막)의 시작으로 한다
+  function finishCues(raw) {
+    raw = raw.filter(function (c) { return isFinite(c.s); }).sort(function (a, b) { return a.s - b.s; });
+    var merged = []; raw.forEach(function (c) { var l = merged[merged.length - 1]; if (l && Math.abs(l.s - c.s) < 0.001) { if (c.text) l.text = l.text ? l.text + '\n' + c.text : c.text; if (c.e && (!l.e || c.e > l.e)) l.e = c.e; } else merged.push({ s: c.s, e: c.e || 0, text: c.text }); });
+    var cues = []; merged.forEach(function (c, i) { if (!c.text) return; var next = merged[i + 1], e = c.e && c.e > c.s ? c.e : (next ? next.s : c.s + 3); if (next && next.s < e && next.s > c.s) e = next.s; cues.push({ s: c.s, e: e, text: c.text }); });
+    return cues;
+  }
+  function parseSami(t) {
+    var re = /<sync\b[^>]*?start\s*=\s*["']?(\d+)["']?[^>]*>/gi, m, marks = [], raw = [];
+    while ((m = re.exec(t))) marks.push({ ms: +m[1], from: re.lastIndex, at: m.index });
+    marks.forEach(function (mk, k) {
+      var chunk = t.slice(mk.from, k + 1 < marks.length ? marks[k + 1].at : t.length).replace(/<\/body>[\s\S]*$/i, '');
+      var pm, pre = /<p\b[^>]*>([\s\S]*?)(?=<p\b|$)/gi, parts = [];
+      while ((pm = pre.exec(chunk))) parts.push(cleanSub(pm[1]));
+      if (!parts.length) parts.push(cleanSub(chunk));
+      raw.push({ s: mk.ms / 1000, e: 0, text: parts.filter(Boolean).join('\n') });
+    });
+    return finishCues(raw);
+  }
+  function parseSrtVtt(t) {
+    var raw = [], re = /(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[.,](\d{1,3})\s*-->\s*(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[.,](\d{1,3})/;
+    var sec = function (h, m, s, ms) { return (+(h || 0)) * 3600 + (+m) * 60 + (+s) + (+('0.' + ms.padEnd(3, '0'))); };
+    t.replace(/\r/g, '').split(/\n\s*\n/).forEach(function (b) {
+      var lines = b.split('\n'), i = -1, k; for (k = 0; k < lines.length; k++) if (re.test(lines[k])) { i = k; break; } if (i < 0) return;
+      var m = lines[i].match(re); raw.push({ s: sec(m[1], m[2], m[3], m[4]), e: sec(m[5], m[6], m[7], m[8]), text: cleanSub(lines.slice(i + 1).join('\n')) });
+    });
+    return finishCues(raw);
+  }
+  function parseLrc(t) {
+    var raw = []; t.replace(/\r/g, '').split('\n').forEach(function (ln) {
+      var stamps = ln.match(/\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g); if (!stamps) return; var text = cleanSub(ln.replace(/\[[^\]]*\]/g, ''));
+      stamps.forEach(function (st) { var m = st.match(/\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/); raw.push({ s: (+m[1]) * 60 + (+m[2]) + (m[3] ? +('0.' + m[3]) : 0), e: 0, text: text }); });
+    });
+    return finishCues(raw);
+  }
+  function parseSubtitle(name, text) {
+    var ext = (String(name).match(/\.([^.]+)$/) || [, ''])[1].toLowerCase(), cues = [];
+    try {
+      if (ext === 'smi' || ext === 'sami' || /<sync\b/i.test(text)) cues = parseSami(text);
+      else if (ext === 'srt' || ext === 'vtt' || /-->/.test(text)) cues = parseSrtVtt(text);
+      else if (ext === 'lrc' || /\[\d{1,3}:\d{2}/.test(text)) cues = parseLrc(text);
+    } catch (e) { cues = []; }
+    return { cues: cues, plain: cues.length ? cues.map(function (c) { return c.text; }).join('\n') : (/<sync\b/i.test(text) ? '' : text.replace(/\r/g, '').trim().slice(0, 4000)) };
+  }
+
+  /* ---------- 파일 열기: mp3와 자막 파일을 함께 고른다. 이름이 같으면(예: lesson_01.mp3 + lesson_01.smi) 서로 짝이 된다 ---------- */
   var baseName = function (n) { return String(n).replace(/\.[^.]+$/, ''); };
+  var subKey = function (n) { return baseName(n).replace(/[._\- ](ko|kr|en|eng|kor|korean|english|한글|영어)$/i, '').toLowerCase(); };
+  var isAudio = function (f) { return /^audio\//.test(f.type) || /\.(mp3|m4a|aac|wav|ogg|opus)$/i.test(f.name); };
+  var isSub = function (f) { return /\.(smi|sami|srt|vtt|lrc|txt)$/i.test(f.name); };
   function commonName(names) {
     if (!names.length) return '새 훈련 자료';
     var a = baseName(names[0]), n = a.length; names.forEach(function (x) { x = baseName(x); var i = 0; while (i < n && i < x.length && a[i] === x[i]) i++; n = i; });
     var p = a.slice(0, n).replace(/[\s_\-.\d]+$/, '').trim();
     return p.length >= 2 ? p : baseName(names[0]);
   }
-  async function importFiles(fileList, targetId) {
-    var files = Array.prototype.slice.call(fileList || []).filter(function (f) { return /^audio\//.test(f.type) || /\.(mp3|m4a|aac|wav|ogg|opus)$/i.test(f.name); });
-    if (!files.length) { toast('mp3 파일을 골라 주세요.'); return; }
-    files.sort(natural);
-    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {} // 저장 공간이 부족해도 브라우저가 파일을 함부로 지우지 않게 요청한다
-    var set = targetId ? state.sets.filter(function (s) { return s.id === targetId; })[0] : null, added = [], failed = 0;
-    for (var i = 0; i < files.length; i++) {
-      toast('파일 ' + (i + 1) + '/' + files.length + '을 저장하는 중…', 60000);
-      var f = files[i], fid = uid();
-      try {
-        await adb.put({ id: fid, name: f.name, size: f.size, type: f.type || 'audio/mpeg', blob: f, t: Date.now() });
-        var dur = await audioDuration(f), text = '';
-        try { text = id3Lyrics(await f.slice(0, 600000).arrayBuffer()); } catch (e) {}
-        have[fid] = 1;
-        added.push({ id: uid(), fid: fid, fname: f.name, fsize: f.size, name: baseName(f.name).slice(0, 120), start: 0, end: 0, dur: dur, mark: false, text: text, split: false });
-      } catch (e) { failed++; }
+  var cueResolve = null;
+  function askCueMode() { return new Promise(function (res) { cueResolve = res; openSheet({ type: 'cue' }); }); }
+  // 한 파일에서 나온 문단들: 시간이 있는 자막이 있고 파일이 길면 자막 줄(n개씩)마다 문단으로 나눈다
+  function buildTracks(it, mode) {
+    var f = it.f, base = baseName(f.name).slice(0, 120), timed = it.subs.filter(function (s) { return s.cues.length >= 2; })[0], out = [];
+    if (mode !== 'whole' && it.dur >= 8 && timed) {
+      var n = +mode || 1, cues = timed.cues, groups = [], i;
+      for (i = 0; i < cues.length; i += n) groups.push(cues.slice(i, i + n));
+      groups.forEach(function (g, k) {
+        var nextS = k + 1 < groups.length ? groups[k + 1][0].s : it.dur, start = Math.max(0, Math.round((g[0].s - 0.08) * 100) / 100), end = Math.min(it.dur, Math.max(start + 0.6, Math.min(g[g.length - 1].e + 0.15, nextS)));
+        var lines = g.map(function (c) { return c.text; });
+        it.subs.forEach(function (o) { if (o === timed || !o.cues.length) return; o.cues.forEach(function (c) { var mid = (c.s + c.e) / 2; if (mid >= start && mid <= end) lines.push(c.text); }); }); // 다른 언어 자막은 같은 시간대에 붙인다
+        out.push({ id: uid(), fid: it.fid, fname: f.name, fsize: f.size, name: (base + ' ' + (k + 1)).slice(0, 120), start: start, end: Math.round(end * 100) / 100, dur: Math.round((end - start) * 100) / 100, mark: false, text: lines.join('\n').slice(0, 4000), split: true });
+      });
+    } else {
+      var text = it.subs.map(function (s) { return s.plain; }).filter(Boolean).join('\n') || it.id3;
+      out.push({ id: uid(), fid: it.fid, fname: f.name, fsize: f.size, name: base, start: 0, end: 0, dur: it.dur, mark: false, text: String(text || '').slice(0, 4000), split: false });
     }
-    if (!added.length) { toast('저장하지 못했어요. 이 기기의 저장 공간을 확인해 주세요.', 5000); return; }
-    if (!set) { set = { id: uid(), name: commonName(files.map(function (f) { return f.name; })).slice(0, 80), fav: false, at: 0, last: 0, tracks: [] }; state.sets.unshift(set); }
-    set.tracks = set.tracks.concat(added).slice(0, 600);
-    commit(); viewSet = set.id; tab = 'lib'; render();
-    var withText = added.filter(function (t) { return t.text; }).length;
-    toast(added.length + '개 문단을 추가했어요.' + (withText ? ' (자막 ' + withText + '개를 mp3에서 읽었어요)' : '') + (failed ? ' ' + failed + '개는 실패했어요.' : ''), 5000);
+    return out;
   }
-  $('#fi').addEventListener('change', function (e) { var fl = e.target.files; importFiles(fl, importTarget); e.target.value = ''; });
-  function pickFiles(targetId) { importTarget = targetId || ''; $('#fi').click(); }
-  // 다른 기기에서 만든 자료: 같은 이름·크기의 파일을 이 기기에서 다시 고르면 이어 붙인다
-  async function relink(fileList, set) {
-    var files = Array.prototype.slice.call(fileList || []), n = 0;
-    for (var i = 0; i < set.tracks.length; i++) {
-      var t = set.tracks[i]; if (have[t.fid]) continue;
-      var f = files.filter(function (x) { return x.name === t.fname && x.size === t.fsize; })[0] || files.filter(function (x) { return x.name === t.fname; })[0]; if (!f) continue;
-      try { await adb.put({ id: t.fid, name: f.name, size: f.size, type: f.type || 'audio/mpeg', blob: f, t: Date.now() }); have[t.fid] = 1; n++; } catch (e) {}
+  async function openFiles(fileList, targetId) {
+    var all = Array.prototype.slice.call(fileList || []), audios = all.filter(isAudio).sort(natural), subs = all.filter(function (f) { return isSub(f) && !isAudio(f); });
+    if (!audios.length) { toast(subs.length ? 'mp3 파일도 같이 골라 주세요. 자막 파일만으로는 훈련할 수 없어요.' : 'mp3 파일을 골라 주세요.', 4500); return; }
+    var subMap = {}, bad = 0;
+    for (var s = 0; s < subs.length; s++) {
+      try { var p = parseSubtitle(subs[s].name, decodeBuf(await subs[s].arrayBuffer())); if (!p.plain && !p.cues.length) { bad++; continue; } (subMap[subKey(subs[s].name)] = subMap[subKey(subs[s].name)] || []).push(p); } catch (e) { bad++; }
     }
-    toast(n ? n + '개 파일을 연결했어요.' : '같은 이름의 파일을 찾지 못했어요. 파일 이름이 같아야 해요.', 4500); render();
+    var items = [];
+    for (var i = 0; i < audios.length; i++) {
+      toast('파일 ' + (i + 1) + '/' + audios.length + '을 읽는 중…', 60000);
+      var f = audios[i], fid = uid(), id3 = '';
+      try { id3 = id3Lyrics(await f.slice(0, 600000).arrayBuffer()); } catch (e) {}
+      items.push({ f: f, fid: fid, dur: await audioDuration(f), id3: id3, subs: subMap[subKey(f.name)] || [] });
+    }
+    var timedAny = items.some(function (it) { return it.dur >= 8 && it.subs.some(function (x) { return x.cues.length >= 2; }); });
+    var mode = timedAny ? await askCueMode() : 'whole';
+    if (mode === null) { toast('취소했어요'); return; }
+    var set = targetId ? state.sets.filter(function (x) { return x.id === targetId; })[0] : null, tracks = [];
+    items.forEach(function (it) { FILES[it.fid] = it.f; tracks = tracks.concat(buildTracks(it, mode)); });
+    if (!set) { set = { id: uid(), name: commonName(audios.map(function (f) { return f.name; })).slice(0, 80), fav: false, at: 0, last: 0, tracks: [] }; state.sets.unshift(set); }
+    set.tracks = set.tracks.concat(tracks).slice(0, 600);
+    commit(); viewSet = set.id; tab = 'lib'; render();
+    var withText = tracks.filter(function (t) { return t.text; }).length, unmatched = subs.length - bad - Object.keys(subMap).filter(function (k) { return items.some(function (it) { return subKey(it.f.name) === k; }); }).reduce(function (a, k) { return a + subMap[k].length; }, 0);
+    toast(tracks.length + '개 문단을 만들었어요. 자막이 있는 문단 ' + withText + '개.' + (bad ? ' 읽을 수 없는 자막 파일 ' + bad + '개(암호화되었거나 형식이 달라요).' : '') + (unmatched > 0 ? ' 이름이 맞는 mp3가 없는 자막 ' + unmatched + '개는 쓰지 않았어요.' : ''), 7000);
+  }
+  $('#fi').addEventListener('change', function (e) { var fl = e.target.files; openFiles(fl, importTarget); e.target.value = ''; });
+  function pickFiles(targetId) { importTarget = targetId || ''; $('#fi').click(); }
+  // 이미 만든 자료의 자막만 따로 채우기: 파일 이름이 같은 문단에 넣는다(시간이 있는 자막으로 나눈 문단은 그대로 둔다)
+  async function applySubs(fileList, set) {
+    var subs = Array.prototype.slice.call(fileList || []).filter(function (f) { return isSub(f) && !isAudio(f); }), n = 0, bad = 0;
+    for (var i = 0; i < subs.length; i++) {
+      try {
+        var p = parseSubtitle(subs[i].name, decodeBuf(await subs[i].arrayBuffer())); if (!p.plain) { bad++; continue; }
+        set.tracks.forEach(function (t) { if (!t.split && subKey(t.fname) === subKey(subs[i].name)) { t.text = (t.text && t.text !== p.plain ? t.text + '\n' : '') + p.plain; n++; } });
+      } catch (e) { bad++; }
+    }
+    if (n) commit(); toast(n ? n + '개 문단에 자막을 넣었어요.' : '이름이 같은 문단을 찾지 못했어요. 자막 파일 이름이 mp3와 같아야 해요.', 5000);
+  }
+  // 다음에 앱을 열었을 때: 같은 이름·크기의 mp3를 다시 열면 이어 붙는다
+  function relink(fileList, set) {
+    var files = Array.prototype.slice.call(fileList || []).filter(isAudio), n = 0, seen = {};
+    set.tracks.forEach(function (t) {
+      if (FILES[t.fid] || seen[t.fid]) return; seen[t.fid] = 1;
+      var f = files.filter(function (x) { return x.name === t.fname && x.size === t.fsize; })[0] || files.filter(function (x) { return x.name === t.fname; })[0];
+      if (f) { FILES[t.fid] = f; n++; }
+    });
+    return n;
+  }
+  function missingOf(set) { var seen = {}, out = []; set.tracks.forEach(function (t) { if (!FILES[t.fid] && !seen[t.fid]) { seen[t.fid] = 1; out.push(t.fname || t.name); } }); return out; }
+  function askOpen(set, idx) {
+    var inp = document.createElement('input'); inp.type = 'file'; inp.multiple = true; inp.accept = 'audio/*,.mp3,.m4a,.wav,.ogg';
+    inp.onchange = function () { var got = relink(inp.files, set), miss = missingOf(set); if (!miss.length) { closeSheet(); render(); openPlayer(set.id, idx); } else openSheet({ type: 'need', setId: set.id, idx: idx, note: got ? got + '개를 연결했어요. 아직 ' + miss.length + '개를 못 찾았어요(파일 이름이 같아야 해요).' : '같은 이름의 파일을 찾지 못했어요. 파일 이름이 같아야 해요.' }); };
+    inp.click();
+  }
+  function startSet(setId, idx) {
+    var s = setById(setId); if (!s || !s.tracks.length) return;
+    if (missingOf(s).length) { openSheet({ type: 'need', setId: setId, idx: idx, note: '' }); return; }
+    openPlayer(setId, idx);
   }
 
   /* ---------- 긴 파일을 문장 단위로 나누기: 쉬는 구간(무음)을 찾아 자른다 ---------- */
@@ -415,9 +502,13 @@
   async function loadTrack(autoplay) {
     var t = curTrack(); if (!t) return;
     stopPoll(); clearTimeout(P.gapTimer); P.gapLeft = 0; try { A.pause(); } catch (e) {}
-    var rec = await adb.get(t.fid);
-    if (!rec) { P.st = 'missing'; drawPlayer(); return; }
-    if (P.urlFid !== t.fid) { if (P.url) URL.revokeObjectURL(P.url); P.url = URL.createObjectURL(rec.blob); P.urlFid = t.fid; A.src = P.url; }
+    var file = FILES[t.fid];
+    if (!file) { // 이번에 열지 않은 파일: 훈련을 이어 가는 중이면 건너뛰고, 아니면 멈춰서 알려 준다
+      var s0 = curSet();
+      if (autoplay && s0 && P.idx < s0.tracks.length - 1) { P.idx++; P.rep = 0; return loadTrack(true); }
+      P.st = 'missing'; drawPlayer(); return;
+    }
+    if (P.urlFid !== t.fid) { if (P.url) URL.revokeObjectURL(P.url); P.url = URL.createObjectURL(file); P.urlFid = t.fid; A.src = P.url; }
     await ready();
     A.playbackRate = state.settings.rate; try { A.preservesPitch = true; } catch (e) {}
     try { A.currentTime = bounds(t).a; } catch (e) {}
@@ -483,7 +574,7 @@
     else if (mode === 'hide' && !P.reveal) { shown = '자막을 가렸어요. 눌러서 보기'; cls += ' dim hide'; }
     else if (mode === 'part' && !P.reveal) { shown = sub.split(/\s+/).slice(0, 3).join(' ') + ' …'; cls += ' hide'; }
     else shown = sub;
-    var stTxt = P.st === 'playing' ? '<b>듣는 중</b>' : P.st === 'gap' ? '<b>따라 말해 보세요</b>' : P.st === 'missing' ? '<b style="color:var(--warn)">이 기기에 파일이 없어요</b>' : P.st === 'done' ? '<b>끝까지 훈련했어요</b>' : '<b style="color:var(--ink2)">멈춤</b>';
+    var stTxt = P.st === 'playing' ? '<b>듣는 중</b>' : P.st === 'gap' ? '<b>따라 말해 보세요</b>' : P.st === 'missing' ? '<b style="color:var(--warn)">이 문단의 mp3를 열지 않았어요</b>' : P.st === 'done' ? '<b>끝까지 훈련했어요</b>' : '<b style="color:var(--ink2)">멈춤</b>';
     var playing = P.st === 'playing' || P.st === 'gap';
     var d = todayKey(), l = state.logs[d] || { sec: 0, rep: 0 }, n = repsFor(t);
     var chips = [1, 2, 5, 10].map(function (x) { return '<button type="button" class="chip" data-act="rep" data-n="' + x + '" aria-pressed="' + (cfg.rep === x) + '">' + x + '회</button>'; }).join('') + (([1, 2, 5, 10].indexOf(cfg.rep) < 0) ? '<button type="button" class="chip" aria-pressed="true">' + cfg.rep + '회</button>' : '') + '<button type="button" class="chip" data-act="rep-custom">직접</button>';
@@ -523,7 +614,7 @@
 
   /* ---------- 시트 ---------- */
   function openSheet(s) { sheet = s; drawSheet(); $('#scrim').hidden = false; }
-  function closeSheet() { sheet = null; $('#scrim').hidden = true; }
+  function closeSheet() { var res = sheet && sheet.type === 'cue' ? cueResolve : null; if (res) cueResolve = null; sheet = null; $('#scrim').hidden = true; if (res) res(null); }
   function setById(id) { return state.sets.filter(function (x) { return x.id === id; })[0]; }
   function drawSheet() {
     var s = sheet, h = '';
@@ -531,7 +622,9 @@
     else if (s.type === 'rename') h = '<h2>자료 이름</h2><div class="field"><input type="text" id="sh-name" maxlength="80" value="' + esc((setById(s.id) || {}).name || '') + '"></div><div class="sheet-f"><button type="button" class="btn primary" data-sh="rename-ok">저장</button><button type="button" class="btn" data-sh="close">취소</button></div>';
     else if (s.type === 'text') { var st = setById(s.setId), tr = st && st.tracks.filter(function (x) { return x.id === s.tid; })[0]; h = '<h2>자막 입력</h2><p class="help">' + esc(tr ? tr.name : '') + ' · 영어와 한글을 줄을 나눠 적으면 “영어만 / 한글만” 보기가 돼요.</p><textarea id="sh-text" rows="8" maxlength="4000" placeholder="영어 문장&#10;한글 뜻">' + esc(tr ? tr.text : '') + '</textarea><div class="sheet-f"><button type="button" class="btn primary" data-sh="text-ok">저장</button><button type="button" class="btn" data-sh="close">취소</button></div>'; }
     else if (s.type === 'confirm') h = '<h2>' + esc(s.title) + '</h2><p style="margin:0;line-height:1.6">' + esc(s.msg) + '</p><div class="sheet-f"><button type="button" class="btn danger" data-sh="confirm-ok">' + esc(s.yes || '삭제') + '</button><button type="button" class="btn" data-sh="close">취소</button></div>';
-    else if (s.type === 'split') h = '<h2>문장 단위로 나누기</h2><p class="help">긴 파일에서 말이 쉬는 곳을 찾아 문단으로 나눠요. 파일은 그대로 두고 구간만 나눠요.</p><div class="field"><span class="lb">쉬는 시간이 이 정도 이상이면 나눠요</span><div class="chips">' + [[0.35, '짧게(0.35초)'], [0.6, '보통(0.6초)'], [0.9, '길게(0.9초)']].map(function (o) { return '<button type="button" class="chip" data-sh="split-go" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div></div><p class="msg" id="sh-msg"></p><div class="sheet-f"><button type="button" class="btn" data-sh="close">닫기</button></div>';
+    else if (s.type === 'cue') h = '<h2>자막으로 문단 나누기</h2><p class="help" style="line-height:1.6">자막 파일에 시간이 들어 있어요. 긴 mp3를 자막 줄에 맞춰 문단으로 나눌까요? 문단마다 반복해서 들을 수 있어요.</p><div class="field"><span class="lb">한 문단에 자막 몇 줄씩?</span><div class="chips">' + [[1, '1줄씩'], [2, '2줄씩'], [3, '3줄씩'], ['whole', '나누지 않고 파일 하나를 한 문단으로']].map(function (o) { return '<button type="button" class="chip" data-sh="cue-pick" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div></div><div class="sheet-f"><button type="button" class="btn" data-sh="close">취소</button></div>';
+    else if (s.type === 'need') { var ns = setById(s.setId), mi = ns ? missingOf(ns) : []; h = '<h2>mp3 파일을 열어 주세요</h2><p style="margin:0;line-height:1.65">파일은 앱에 저장하지 않아요. 이 자료의 mp3 ' + mi.length + '개를 열어 주세요. 폴더에서 전체를 한 번에 고르면 돼요.</p><p class="help">필요한 파일: ' + esc(mi.slice(0, 3).join(', ')) + (mi.length > 3 ? ' 외 ' + (mi.length - 3) + '개' : '') + '</p>' + (s.note ? '<p class="msg">' + esc(s.note) + '</p>' : '') + '<div class="sheet-f"><button type="button" class="btn primary" data-sh="need-open">mp3 열기</button>' + (s.note && mi.length < ns.tracks.length ? '<button type="button" class="btn" data-sh="need-go">있는 파일로 시작</button>' : '') + '<span class="sp"></span><button type="button" class="btn" data-sh="close">닫기</button></div>'; }
+    else if (s.type === 'split') h ='<h2>문장 단위로 나누기</h2><p class="help">긴 파일에서 말이 쉬는 곳을 찾아 문단으로 나눠요. 파일은 그대로 두고 구간만 나눠요.</p><div class="field"><span class="lb">쉬는 시간이 이 정도 이상이면 나눠요</span><div class="chips">' + [[0.35, '짧게(0.35초)'], [0.6, '보통(0.6초)'], [0.9, '길게(0.9초)']].map(function (o) { return '<button type="button" class="chip" data-sh="split-go" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div></div><p class="msg" id="sh-msg"></p><div class="sheet-f"><button type="button" class="btn" data-sh="close">닫기</button></div>';
     $('#sheet').innerHTML = h;
     var f = $('#sh-n') || $('#sh-name') || $('#sh-text'); if (f) setTimeout(function () { try { f.focus(); } catch (e) {} }, 60);
   }
@@ -543,12 +636,15 @@
     else if (a === 'rename-ok') { var st = setById(s.id); if (st) { st.name = ($('#sh-name').value.trim() || st.name).slice(0, 80); commit(); } closeSheet(); }
     else if (a === 'text-ok') { var ss = setById(s.setId), tr = ss && ss.tracks.filter(function (x) { return x.id === s.tid; })[0]; if (tr) { tr.text = $('#sh-text').value.trim().slice(0, 4000); commit(false); } closeSheet(); if (P.open) drawPlayer(); else render(); }
     else if (a === 'confirm-ok') { var fn = s.onYes; closeSheet(); if (fn) fn(); }
+    else if (a === 'cue-pick') { var cr = cueResolve; cueResolve = null; closeSheet(); if (cr) cr(b.dataset.v === 'whole' ? 'whole' : +b.dataset.v); }
+    else if (a === 'need-open') { var ms = setById(s.setId); if (ms) { closeSheet(); askOpen(ms, s.idx); } }
+    else if (a === 'need-go') { var gs = s.setId, gi = s.idx; closeSheet(); openPlayer(gs, gi); }
     else if (a === 'split-go') {
       var st2 = setById(s.setId), tr2 = st2 && st2.tracks.filter(function (x) { return x.id === s.tid; })[0], msg = $('#sh-msg'); if (!tr2) return;
       msg.style.color = 'var(--ink2)'; msg.textContent = '소리를 분석하는 중이에요…';
       try {
-        var rec = await adb.get(tr2.fid); if (!rec) { msg.style.color = 'var(--warn)'; msg.textContent = '이 기기에 파일이 없어요.'; return; }
-        var r = await findSegments(rec.blob, +b.dataset.v);
+        var rec = FILES[tr2.fid]; if (!rec) { msg.style.color = 'var(--warn)'; msg.textContent = '이번에 mp3를 열지 않았어요. 자료에서 훈련을 시작할 때 mp3를 열어 주세요.'; return; }
+        var r = await findSegments(rec, +b.dataset.v);
         if (r.segs.length < 2) { msg.style.color = 'var(--warn)'; msg.textContent = '나눌 곳을 찾지 못했어요. “짧게”로 다시 해 보세요.'; return; }
         var idx = st2.tracks.indexOf(tr2), parts = r.segs.map(function (sg, i) { return { id: uid(), fid: tr2.fid, fname: tr2.fname, fsize: tr2.fsize, name: (tr2.name + ' ' + (i + 1)).slice(0, 120), start: sg.start, end: sg.end, dur: sg.end - sg.start, mark: false, text: '', split: true }; });
         st2.tracks.splice.apply(st2.tracks, [idx, 1].concat(parts)); closeSheet(); commit(); toast(parts.length + '개 문단으로 나눴어요.', 4000);
@@ -567,7 +663,7 @@
   var setTotal = function (s) { return s.tracks.reduce(function (a, t) { return a + segLen(t); }, 0); };
   function setCard(s) {
     var miss = s.tracks.filter(function (t) { return !have[t.fid]; }).length;
-    return '<button type="button" class="setcard" data-act="open-set" data-id="' + s.id + '"><span class="ico" aria-hidden="true">🎧</span><span class="tx"><b>' + (s.fav ? '★ ' : '') + esc(s.name) + '</b><small>' + s.tracks.length + '문단 · ' + fmt(setTotal(s)) + (miss ? ' · ⚠ 파일 ' + miss + '개 없음' : '') + (s.at ? ' · 최근 ' + (new Date(s.at).getMonth() + 1) + '/' + new Date(s.at).getDate() : '') + '</small></span><span class="go" aria-hidden="true">›</span></button>';
+    return '<button type="button" class="setcard" data-act="open-set" data-id="' + s.id + '"><span class="ico" aria-hidden="true">🎧</span><span class="tx"><b>' + (s.fav ? '★ ' : '') + esc(s.name) + '</b><small>' + s.tracks.length + '문단 · ' + fmt(setTotal(s)) + (miss ? ' · mp3 열기 필요' : '') + (s.at ? ' · 최근 ' + (new Date(s.at).getMonth() + 1) + '/' + new Date(s.at).getDate() : '') + '</small></span><span class="go" aria-hidden="true">›</span></button>';
   }
   function homePane() {
     var d = todayKey(), l = state.logs[d] || { sec: 0, rep: 0 }, goal = state.settings.goal, pct = Math.min(100, l.sec / (goal * 60) * 100), h = '';
@@ -577,22 +673,23 @@
     if (rec.length) { var x = rec[0]; h += '<section class="card"><div class="sec-t"><h2>이어서 훈련</h2><span>' + esc(x.s.name) + ' · ' + (Math.min(x.r.idx, x.s.tracks.length - 1) + 1) + '번째 문단</span></div><button type="button" class="btn primary" style="width:100%;min-height:50px;font-size:15px" data-act="play-set" data-id="' + x.s.id + '" data-i="' + x.r.idx + '">▶ 이어서 훈련하기</button></section>'; }
     var fav = state.sets.filter(function (s) { return s.fav; });
     if (fav.length) h += '<section class="card"><div class="sec-t"><h2>즐겨찾기</h2></div><div class="sets">' + fav.map(setCard).join('') + '</div></section>';
-    if (rec.length > 1) h += '<section class="card"><div class="sec-t"><h2>최근 훈련</h2></div><div class="sets">' + rec.slice(1, 5).map(function (x) { return setCard(x.s); }).join('') + '</div></section>';
-    if (!state.sets.length) h += '<section class="card"><div class="empty"><b>훈련 자료가 아직 없어요</b>mp3 파일을 고르면 파일 하나가 한 문단이 돼요. 문단마다 정한 횟수만큼 반복하고, 따라 말할 틈을 줘요.</div><div style="display:flex;justify-content:center"><button type="button" class="btn primary" data-act="add-files">＋ mp3 파일 추가</button></div></section>';
+    if (state.sets.length && !rec.length && !fav.length) h += '<section class="card"><div class="sec-t"><h2>내 자료</h2><span>' + state.sets.length + '개</span></div><div class="sets">' + state.sets.slice(0, 3).map(setCard).join('') + '</div></section>';
+    if (rec.length > 1) h +='<section class="card"><div class="sec-t"><h2>최근 훈련</h2></div><div class="sets">' + rec.slice(1, 5).map(function (x) { return setCard(x.s); }).join('') + '</div></section>';
+    if (!state.sets.length) h += '<section class="card"><div class="empty"><b>훈련 자료가 아직 없어요</b>mp3와 자막 파일(.smi, .srt 등)을 함께 열면 문단이 만들어져요. 문단마다 정한 횟수만큼 반복하고, 따라 말할 틈을 줘요. 파일은 앱에 저장하지 않아요.</div><div style="display:flex;justify-content:center"><button type="button" class="btn primary" data-act="add-files">＋ mp3·자막 열기</button></div></section>';
     return h;
   }
   function libPane() {
     if (viewSet) { var s = setById(viewSet); if (s) return setPane(s); viewSet = ''; }
-    return '<section class="card"><div class="sec-t"><h2>훈련 자료</h2><span>' + state.sets.length + '개</span></div>' + (state.sets.length ? '<div class="sets">' + state.sets.map(setCard).join('') + '</div>' : '<div class="empty"><b>자료가 없어요</b>mp3 파일을 추가해서 시작해요.</div>') + '<div style="margin-top:14px"><button type="button" class="btn primary" data-act="add-files">＋ mp3 파일 추가</button></div><p class="help" style="margin-top:10px">파일은 이 기기에만 저장돼요. 자료 목록과 훈련 기록은 계정에 저장돼서 다른 기기에서도 보여요(그 기기에는 파일을 다시 골라야 해요).</p></section>';
+    return '<section class="card"><div class="sec-t"><h2>훈련 자료</h2><span>' + state.sets.length + '개</span></div>' + (state.sets.length ? '<div class="sets">' + state.sets.map(setCard).join('') + '</div>' : '<div class="empty"><b>자료가 없어요</b>mp3와 자막 파일을 열어서 시작해요.</div>') + '<div style="margin-top:14px"><button type="button" class="btn primary" data-act="add-files">＋ mp3·자막 열기</button></div><p class="help" style="margin-top:10px;line-height:1.7">mp3와 자막 파일을 <b>같이</b> 고르세요(이름이 같으면 짝이 돼요. 예: lesson_01.mp3 + lesson_01.smi). 파일은 앱에 저장하지 않고 열어 둔 동안만 써요. 자료 구성과 자막, 훈련 기록은 계정에 저장돼서 다른 기기에서도 보이고, 훈련할 때 mp3를 다시 열면 이어져요.</p></section>';
   }
   function setPane(s) {
     var miss = s.tracks.filter(function (t) { return !have[t.fid]; }).length;
     var h = '<section class="card"><div class="sec-t"><button type="button" class="btn sm" data-act="back-lib">← 자료 목록</button><span>' + s.tracks.length + '문단 · ' + fmt(setTotal(s)) + '</span></div><div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><h2 style="margin:0;font-size:19px;flex:1;min-width:0;overflow-wrap:anywhere">' + esc(s.name) + '</h2><button type="button" class="btn sm" data-act="fav" data-id="' + s.id + '" aria-label="즐겨찾기">' + (s.fav ? '★' : '☆') + '</button></div>';
-    if (miss) h += '<div class="miss">이 기기에 파일이 없는 문단이 ' + miss + '개 있어요. <button type="button" class="linkbtn" data-act="relink" data-id="' + s.id + '">파일 다시 고르기</button> (같은 이름의 mp3를 고르면 연결돼요)</div>';
-    h += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0"><button type="button" class="btn primary" data-act="play-set" data-id="' + s.id + '" data-i="' + s.last + '"' + (s.tracks.length ? '' : ' disabled') + '>▶ 훈련 시작</button><button type="button" class="btn" data-act="add-files-to" data-id="' + s.id + '">＋ 파일 추가</button><button type="button" class="btn" data-act="rename" data-id="' + s.id + '">이름 바꾸기</button></div>';
+    if (miss) h += '<div class="miss">이번에는 mp3를 아직 열지 않았어요. <button type="button" class="linkbtn" data-act="relink" data-id="' + s.id + '">mp3 열기</button> (훈련을 시작할 때도 열 수 있어요. 같은 이름의 파일이면 이어져요)</div>';
+    h += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0"><button type="button" class="btn primary" data-act="play-set" data-id="' + s.id + '" data-i="' + s.last + '"' + (s.tracks.length ? '' : ' disabled') + '>▶ 훈련 시작</button><button type="button" class="btn" data-act="add-files-to" data-id="' + s.id + '">＋ mp3·자막 열기</button><button type="button" class="btn" data-act="open-subs" data-id="' + s.id + '">자막 파일 열기</button><button type="button" class="btn" data-act="rename" data-id="' + s.id + '">이름 바꾸기</button></div>';
     h += '<p class="help" style="margin-bottom:6px">✓ 표시한 문단만 따로 반복할 수 있어요(어려운 문단 표시용).</p>';
     h += s.tracks.map(function (t, i) {
-      return '<div class="trk"><input type="checkbox" data-mark="' + i + '"' + (t.mark ? ' checked' : '') + ' aria-label="반복 표시"><span class="n">' + (i + 1) + '</span><button type="button" class="nm" data-act="play-set" data-id="' + s.id + '" data-i="' + i + '">' + esc(t.name) + '</button>' + (t.text ? '<span class="tag">자막</span>' : '') + (have[t.fid] ? '' : '<span class="mx">파일 없음</span>') + '<small class="num">' + fmt(segLen(t)) + '</small>' +
+      return '<div class="trk"><input type="checkbox" data-mark="' + i + '"' + (t.mark ? ' checked' : '') + ' aria-label="반복 표시"><span class="n">' + (i + 1) + '</span><button type="button" class="nm" data-act="play-set" data-id="' + s.id + '" data-i="' + i + '">' + esc(t.name) + '</button>' + (t.text ? '<span class="tag">자막</span>' : '') + (have[t.fid] ? '' : '<span class="mx">mp3 안 열림</span>') + '<small class="num">' + fmt(segLen(t)) + '</small>' +
         '<button type="button" class="btn sm" data-act="t-menu" data-i="' + i + '" aria-label="문단 설정">⋯</button></div>';
     }).join('');
     h += '<div class="tact"><button type="button" class="btn danger sm" data-act="del-set" data-id="' + s.id + '">이 자료 삭제</button></div></section>';
@@ -615,16 +712,15 @@
       '<div class="field"><span class="lb">재생 속도</span><div class="chips">' + [0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5].map(function (v) { return chip('rate', v, v + '배'); }).join('') + '</div></div>' +
       '<div class="field"><span class="lb">자막</span><div class="chips">' + [['show', '전체 보기'], ['part', '일부만 보기'], ['hide', '전체 가리기']].map(function (o) { return chip('sub', o[0], o[1]); }).join('') + '</div><div class="chips">' + [['both', '한글/영어'], ['en', '영어'], ['ko', '한글']].map(function (o) { return chip('lang', o[0], o[1]); }).join('') + '</div></div>' +
       '<div class="field"><span class="lb">하루 훈련 목표(분)</span><input type="number" id="cfg-goal" min="1" max="600" step="1" inputmode="numeric" value="' + c.goal + '" style="width:120px"><span class="help">루틴의 목표 시간은 루틴 화면에서 따로 정해요.</span></div></section>' +
-      '<section class="card"><div class="sec-t"><h2>저장 공간</h2></div><p class="help" id="cfg-store">확인하는 중…</p><div style="margin-top:12px"><button type="button" class="btn danger sm" data-act="clear-audio">이 기기에 저장된 mp3 모두 지우기</button></div></section>';
+      '<section class="card"><div class="sec-t"><h2>파일은 저장하지 않아요</h2></div><p class="help" style="line-height:1.7">mp3와 자막 파일은 앱에 복사해 두지 않고, 훈련할 때 <b>열어 둔 동안만</b> 써요. 계정에는 자료 이름, 문단 구성, 자막 글, ✓ 표시, 이어서 훈련할 위치, 훈련 기록만 저장돼요. 다음에 훈련할 때는 같은 mp3를 한 번 열어 주세요.</p></section>';
   }
   function render() {
     var h = '<div class="head"><h1>영어 훈련 플레이어' + (window.APP_VERSION ? ' <span class="ver">v' + esc(window.APP_VERSION) + '</span>' : '') + '</h1><span class="saved" id="saved"></span></div>';
     h += '<div class="tabs" role="tablist" aria-label="화면">' + [['home', '홈'], ['lib', '자료'], ['log', '기록'], ['cfg', '설정']].map(function (x) { return '<button type="button" role="tab" data-act="tab" data-t="' + x[0] + '" aria-selected="' + (tab === x[0]) + '">' + x[1] + '</button>'; }).join('') + '</div>';
     h += '<div class="pane">' + (tab === 'home' ? homePane() : tab === 'lib' ? libPane() : tab === 'log' ? logPane() : setPaneSettings()) + '</div>';
     var keep = window.pageYOffset; $('#root').innerHTML = h; setSaved(); window.scrollTo(0, keep);
-    if (tab === 'cfg') storageInfo();
   }
-  async function storageInfo() {
+  async function storageInfoUnused() {
     var el = $('#cfg-store'); if (!el) return;
     try { var e = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null, n = Object.keys(have).length; el.textContent = '저장된 mp3 ' + n + '개' + (e ? ' · 이 앱이 쓰는 공간 약 ' + Math.round((e.usage || 0) / 1048576) + 'MB (사용 가능 약 ' + Math.round(((e.quota || 0) - (e.usage || 0)) / 1048576) + 'MB)' : ''); } catch (x) { el.textContent = ''; }
   }
@@ -635,16 +731,16 @@
     else if (a === 'add-files-to') pickFiles(id);
     else if (a === 'open-set') { viewSet = id; tab = 'lib'; render(); window.scrollTo(0, 0); }
     else if (a === 'back-lib') { viewSet = ''; render(); }
-    else if (a === 'play-set') { openPlayer(id, +t.dataset.i); }
+    else if (a === 'play-set') { startSet(id, +t.dataset.i); }
+    else if (a === 'open-subs') { var sinp = document.createElement('input'); sinp.type = 'file'; sinp.multiple = true; sinp.accept = '.smi,.sami,.srt,.vtt,.lrc,.txt'; sinp.onchange = function () { applySubs(sinp.files, setById(id)); }; sinp.click(); }
     else if (a === 'fav') { var s = setById(id); if (s) { s.fav = !s.fav; commit(); } }
     else if (a === 'rename') openSheet({ type: 'rename', id: id });
-    else if (a === 'relink') { var inp = document.createElement('input'); inp.type = 'file'; inp.multiple = true; inp.accept = 'audio/*,.mp3'; inp.onchange = function () { relink(inp.files, setById(id)); }; inp.click(); }
-    else if (a === 'del-set') { var ds = setById(id); if (ds) confirmBox('자료 삭제', '“' + ds.name + '” 자료와 이 기기에 저장된 mp3를 삭제할까요? 훈련 기록은 남아요.', '삭제', async function () { var fids = {}; ds.tracks.forEach(function (x) { fids[x.fid] = 1; }); state.sets = state.sets.filter(function (x) { return x.id !== id; }); state.recent = state.recent.filter(function (r) { return r.setId !== id; }); var still = {}; state.sets.forEach(function (x) { x.tracks.forEach(function (y) { still[y.fid] = 1; }); }); for (var f in fids) if (!still[f]) { await adb.del(f); delete have[f]; } viewSet = ''; commit(); toast('삭제했어요'); }); }
+    else if (a === 'relink') { var rs = setById(id); if (rs) askOpen(rs, rs.last); }
+    else if (a === 'del-set') { var ds = setById(id); if (ds) confirmBox('자료 삭제', '“' + ds.name + '” 자료(문단 구성과 자막)를 삭제할까요? 내 mp3 파일은 지워지지 않고, 훈련 기록은 남아요.', '삭제', function () { state.sets = state.sets.filter(function (x) { return x.id !== id; }); state.recent = state.recent.filter(function (r) { return r.setId !== id; }); viewSet = ''; commit(); toast('삭제했어요'); }); }
     else if (a === 't-menu') { var cs = setById(viewSet), tr = cs && cs.tracks[+t.dataset.i]; if (tr) openSheet({ type: 'tmenu', setId: cs.id, tid: tr.id }); }
     else if (a === 'cfg') { var k = t.dataset.k, v = t.dataset.v; state.settings[k] = k === 'rate' || k === 'rep' ? +v : v; commit(); }
     else if (a === 'rep-custom') openSheet({ type: 'rep' });
     else if (a === 'del-logs') confirmBox('훈련 기록 삭제', '훈련 기록을 전부 지울까요? 되돌릴 수 없어요.', '모두 삭제', function () { state.logs = {}; state.recent = []; commit(); toast('훈련 기록을 지웠어요'); });
-    else if (a === 'clear-audio') confirmBox('mp3 모두 지우기', '이 기기에 저장된 mp3를 모두 지울까요? 자료 목록과 기록은 남고, 훈련하려면 파일을 다시 골라야 해요.', '지우기', async function () { await adb.clear(); have = {}; render(); toast('지웠어요'); });
   });
   document.addEventListener('change', function (e) {
     var el = e.target;
@@ -668,11 +764,10 @@
     else if (a === 't-merge') { var fid = tr.fid, first = st.tracks.findIndex(function (x) { return x.fid === fid && x.split; }); st.tracks = st.tracks.filter(function (x) { return !(x.fid === fid && x.split); }); st.tracks.splice(first, 0, { id: uid(), fid: fid, fname: tr.fname, fsize: tr.fsize, name: baseName(tr.fname).slice(0, 120), start: 0, end: 0, dur: 0, mark: false, text: '', split: false }); closeSheet(); fixDuration(st, fid); commit(); toast('하나로 합쳤어요'); }
     else if (a === 't-del') { var i = st.tracks.indexOf(tr); st.tracks.splice(i, 1); closeSheet(); commit(); toast('문단을 삭제했어요'); }
   });
-  async function fixDuration(st, fid) { var rec = await adb.get(fid); if (!rec) return; var d = await audioDuration(rec.blob), t = st.tracks.filter(function (x) { return x.fid === fid && !x.split; })[0]; if (t) { t.dur = d; commit(false); render(); } }
+  async function fixDuration(st, fid) { var rec = FILES[fid]; if (!rec) return; var d = await audioDuration(rec), t = st.tracks.filter(function (x) { return x.fid === fid && !x.split; })[0]; if (t) { t.dur = d; commit(false); render(); } }
   window.addEventListener('beforeunload', function () { if (P.open && P.setId) { try { var s = curSet(); if (s) s.last = P.idx; writeLocal(); } catch (e) {} } });
 
-  refreshHave().then(function () { render(); initRemote(); report(todayKey()); });
-  render();
+  render(); initRemote(); report(todayKey());
 })();
 </script>
 </body>

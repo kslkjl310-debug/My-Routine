@@ -298,6 +298,59 @@
     });
   }
 
+  /* ---------- mp3 꼬리에 들어 있는 자막 읽기(원래 앱의 mp3: 파일 끝에 암호화된 SAMI 자막이 붙어 있다) ----------
+     끝 10바이트 = 표시 문자열(singlepubl / publmobile), 그 앞 8바이트 = 자막 길이(리틀엔디언), 그 앞 = 자막 덩어리(Blowfish ECB).
+     Blowfish 표는 원주율(π)의 16진 소수 자릿수라서 처음 한 번만 계산한다. */
+  var BF_CACHE = null;
+  function bfTables() {
+    if (BF_CACHE) return BF_CACHE;
+    var WORDS = 18 + 1024, BITS = 32 * WORDS + 64, ONE = 1n << BigInt(BITS);
+    var atanInv = function (x) { var X = BigInt(x), X2 = X * X, term = ONE / X, sum = term, k = 1n, sign = -1n; while (term > 0n) { term = term / X2; sum += sign * (term / (2n * k + 1n)); sign = -sign; k++; } return sum; };
+    var pi = 16n * atanInv(5) - 4n * atanInv(239), frac = pi - 3n * ONE, w = new Uint32Array(WORDS), i;
+    for (i = 0; i < WORDS; i++) w[i] = Number((frac >> BigInt(BITS - 32 * (i + 1))) & 0xFFFFFFFFn);
+    BF_CACHE = { P: w.subarray(0, 18), S: w.subarray(18) };
+    return BF_CACHE;
+  }
+  function bfMake(keyBytes) {
+    var T = bfTables(), P = new Uint32Array(T.P), S = new Uint32Array(T.S), i, j, k = 0;
+    for (i = 0; i < 18; i++) { var d = 0; for (j = 0; j < 4; j++) { d = ((d << 8) | keyBytes[k]) >>> 0; k = (k + 1) % keyBytes.length; } P[i] = (P[i] ^ d) >>> 0; }
+    var F = function (x) { return ((((S[x >>> 24] + S[256 + ((x >>> 16) & 255)]) >>> 0) ^ S[512 + ((x >>> 8) & 255)]) + S[768 + (x & 255)]) >>> 0; };
+    var enc = function (l, r) { var t; for (var n = 0; n < 16; n++) { l = (l ^ P[n]) >>> 0; r = (r ^ F(l)) >>> 0; t = l; l = r; r = t; } t = l; l = r; r = t; r = (r ^ P[16]) >>> 0; l = (l ^ P[17]) >>> 0; return [l, r]; };
+    var l = 0, r = 0, o;
+    for (i = 0; i < 18; i += 2) { o = enc(l, r); l = o[0]; r = o[1]; P[i] = l; P[i + 1] = r; }
+    for (i = 0; i < 1024; i += 2) { o = enc(l, r); l = o[0]; r = o[1]; S[i] = l; S[i + 1] = r; }
+    return function decrypt(bytes) { // 8바이트 단위, 패딩 없음
+      var out = new Uint8Array(bytes.length - (bytes.length % 8)), n, t, L, R;
+      for (var p = 0; p < out.length; p += 8) {
+        L = ((bytes[p] << 24) | (bytes[p + 1] << 16) | (bytes[p + 2] << 8) | bytes[p + 3]) >>> 0; R = ((bytes[p + 4] << 24) | (bytes[p + 5] << 16) | (bytes[p + 6] << 8) | bytes[p + 7]) >>> 0;
+        for (n = 17; n > 1; n--) { L = (L ^ P[n]) >>> 0; R = (R ^ F(L)) >>> 0; t = L; L = R; R = t; }
+        t = L; L = R; R = t; R = (R ^ P[1]) >>> 0; L = (L ^ P[0]) >>> 0;
+        out[p] = L >>> 24; out[p + 1] = (L >>> 16) & 255; out[p + 2] = (L >>> 8) & 255; out[p + 3] = L & 255; out[p + 4] = R >>> 24; out[p + 5] = (R >>> 16) & 255; out[p + 6] = (R >>> 8) & 255; out[p + 7] = R & 255;
+      }
+      return out;
+    };
+  }
+  var EMB_KEYS = { singlepubl: 'singlepc', publmobile: 'parkmobi' };
+  // mp3 파일 끝에 붙은 자막을 읽어 SAMI 글로 돌려준다. 없으면 ''
+  async function embeddedSami(file) {
+    try {
+      if (file.size < 40) return '';
+      var tail = new Uint8Array(await file.slice(file.size - 18).arrayBuffer()), sig = String.fromCharCode.apply(null, tail.subarray(8)), key = EMB_KEYS[sig.toLowerCase()];
+      if (!key) return '';
+      var len = new DataView(tail.buffer).getUint32(0, true); if (!len || len > 2000000 || len + 18 > file.size) return '';
+      var blob = new Uint8Array(await file.slice(file.size - 18 - len, file.size - 18).arrayBuffer()), plain = bfMake(new TextEncoder().encode(key))(blob);
+      var text = new TextDecoder('euc-kr').decode(plain), s = text.search(/<sami/i); if (s < 0) return '';
+      var e = text.search(/<\/sami>/i); text = text.slice(s, e < 0 ? undefined : e + 7).replace(/\u0000/g, '');
+      return /<sync\b/i.test(text) ? text : '';
+    } catch (e) { return ''; }
+  }
+  // 한 SAMI에 영어 줄과 한글 줄이 시간순으로 섞여 있으면 문단이 어긋나므로, 언어별(Class=…)로 갈라서 따로 읽는다
+  function splitSamiByClass(text) {
+    var names = {}, m, re = /<p\b[^>]*class\s*=\s*["']?([A-Za-z0-9_-]+)/gi; while ((m = re.exec(text))) names[m[1]] = 1;
+    var list = Object.keys(names); if (list.length < 2) return [text];
+    return list.map(function (cl) { var rx = new RegExp('(<sync\\b[^>]*>\\s*<p\\b[^>]*class\\s*=\\s*["\']?' + cl + '\\b[^>]*>[\\s\\S]*?)(?=<sync\\b|<\\/body>|$)', 'gi'), out = [], x; while ((x = rx.exec(text))) out.push(x[1]); return '<SAMI><BODY>' + out.join('') + '</BODY></SAMI>'; });
+  }
+
   /* ---------- 자막 파일 읽기(.smi .srt .vtt .lrc .txt). 한국어 자막에 흔한 EUC-KR 글자 깨짐도 처리한다 ---------- */
   function decodeBuf(buf) {
     var b = new Uint8Array(buf);
@@ -386,7 +439,7 @@
   async function openFiles(fileList, targetId) {
     var all = Array.prototype.slice.call(fileList || []), audios = all.filter(isAudio).sort(natural), subs = all.filter(function (f) { return isSub(f) && !isAudio(f); });
     if (!audios.length) { toast(subs.length ? 'mp3 파일도 같이 골라 주세요. 자막 파일만으로는 훈련할 수 없어요.' : 'mp3 파일을 골라 주세요.', 4500); return; }
-    var subMap = {}, bad = 0;
+    var subMap = {}, bad = 0, embN = 0;
     for (var s = 0; s < subs.length; s++) {
       try { var p = parseSubtitle(subs[s].name, decodeBuf(await subs[s].arrayBuffer())); if (!p.plain && !p.cues.length) { bad++; continue; } (subMap[subKey(subs[s].name)] = subMap[subKey(subs[s].name)] || []).push(p); } catch (e) { bad++; }
     }
@@ -395,7 +448,8 @@
       toast('파일 ' + (i + 1) + '/' + audios.length + '을 읽는 중…', 60000);
       var f = audios[i], fid = uid(), id3 = '';
       try { id3 = id3Lyrics(await f.slice(0, 600000).arrayBuffer()); } catch (e) {}
-      items.push({ f: f, fid: fid, dur: await audioDuration(f), id3: id3, subs: subMap[subKey(f.name)] || [] });
+      var isubs = subMap[subKey(f.name)] || [], emb = ''; if (!isubs.length) { emb = await embeddedSami(f); if (emb) { embN++; isubs = splitSamiByClass(emb).map(function (x) { return parseSubtitle('embedded.smi', x); }).filter(function (p) { return p.plain || p.cues.length; }); } }
+      items.push({ f: f, fid: fid, dur: await audioDuration(f), id3: id3, subs: isubs });
     }
     var timedAny = items.some(function (it) { return it.dur >= 8 && it.subs.some(function (x) { return x.cues.length >= 2; }); });
     var mode = timedAny ? await askCueMode() : 'whole';
@@ -406,16 +460,16 @@
     set.tracks = set.tracks.concat(tracks).slice(0, 600);
     commit(); viewSet = set.id; tab = 'lib'; render();
     var withText = tracks.filter(function (t) { return t.text; }).length, unmatched = subs.length - bad - Object.keys(subMap).filter(function (k) { return items.some(function (it) { return subKey(it.f.name) === k; }); }).reduce(function (a, k) { return a + subMap[k].length; }, 0);
-    toast(tracks.length + '개 문단을 만들었어요. 자막이 있는 문단 ' + withText + '개.' + (bad ? ' 읽을 수 없는 자막 파일 ' + bad + '개(암호화되었거나 형식이 달라요).' : '') + (unmatched > 0 ? ' 이름이 맞는 mp3가 없는 자막 ' + unmatched + '개는 쓰지 않았어요.' : ''), 7000);
+    toast(tracks.length + '개 문단을 만들었어요. 자막이 있는 문단 ' + withText + '개.' + (embN ? ' mp3 안에 든 자막 ' + embN + '개를 읽었어요.' : '') + (bad ? ' 읽을 수 없는 자막 파일 ' + bad + '개(암호화되었거나 형식이 달라요).' : '') + (unmatched > 0 ? ' 이름이 맞는 mp3가 없는 자막 ' + unmatched + '개는 쓰지 않았어요.' : ''), 7000);
   }
   $('#fi').addEventListener('change', function (e) { var fl = e.target.files; openFiles(fl, importTarget); e.target.value = ''; });
   function pickFiles(targetId) { importTarget = targetId || ''; $('#fi').click(); }
   // 이미 만든 자료의 자막만 따로 채우기: 파일 이름이 같은 문단에 넣는다(시간이 있는 자막으로 나눈 문단은 그대로 둔다)
   async function applySubs(fileList, set) {
-    var subs = Array.prototype.slice.call(fileList || []).filter(function (f) { return isSub(f) && !isAudio(f); }), n = 0, bad = 0;
+    var subs = Array.prototype.slice.call(fileList || []).filter(function (f) { return isSub(f) || isAudio(f); }), n = 0, bad = 0;
     for (var i = 0; i < subs.length; i++) {
       try {
-        var p = parseSubtitle(subs[i].name, decodeBuf(await subs[i].arrayBuffer())); if (!p.plain) { bad++; continue; }
+        var p = isAudio(subs[i]) ? parseSubtitle('embedded.smi', await embeddedSami(subs[i])) : parseSubtitle(subs[i].name, decodeBuf(await subs[i].arrayBuffer())); if (!p.plain) { bad++; continue; }
         set.tracks.forEach(function (t) { if (!t.split && subKey(t.fname) === subKey(subs[i].name)) { t.text = (t.text && t.text !== p.plain ? t.text + '\n' : '') + p.plain; n++; } });
       } catch (e) { bad++; }
     }
@@ -686,7 +740,7 @@
     var miss = s.tracks.filter(function (t) { return !have[t.fid]; }).length;
     var h = '<section class="card"><div class="sec-t"><button type="button" class="btn sm" data-act="back-lib">← 자료 목록</button><span>' + s.tracks.length + '문단 · ' + fmt(setTotal(s)) + '</span></div><div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><h2 style="margin:0;font-size:19px;flex:1;min-width:0;overflow-wrap:anywhere">' + esc(s.name) + '</h2><button type="button" class="btn sm" data-act="fav" data-id="' + s.id + '" aria-label="즐겨찾기">' + (s.fav ? '★' : '☆') + '</button></div>';
     if (miss) h += '<div class="miss">이번에는 mp3를 아직 열지 않았어요. <button type="button" class="linkbtn" data-act="relink" data-id="' + s.id + '">mp3 열기</button> (훈련을 시작할 때도 열 수 있어요. 같은 이름의 파일이면 이어져요)</div>';
-    h += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0"><button type="button" class="btn primary" data-act="play-set" data-id="' + s.id + '" data-i="' + s.last + '"' + (s.tracks.length ? '' : ' disabled') + '>▶ 훈련 시작</button><button type="button" class="btn" data-act="add-files-to" data-id="' + s.id + '">＋ mp3·자막 열기</button><button type="button" class="btn" data-act="open-subs" data-id="' + s.id + '">자막 파일 열기</button><button type="button" class="btn" data-act="rename" data-id="' + s.id + '">이름 바꾸기</button></div>';
+    h += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0"><button type="button" class="btn primary" data-act="play-set" data-id="' + s.id + '" data-i="' + s.last + '"' + (s.tracks.length ? '' : ' disabled') + '>▶ 훈련 시작</button><button type="button" class="btn" data-act="add-files-to" data-id="' + s.id + '">＋ mp3·자막 열기</button><button type="button" class="btn" data-act="open-subs" data-id="' + s.id + '">자막 파일·자막 든 mp3 열기</button><button type="button" class="btn" data-act="rename" data-id="' + s.id + '">이름 바꾸기</button></div>';
     h += '<p class="help" style="margin-bottom:6px">✓ 표시한 문단만 따로 반복할 수 있어요(어려운 문단 표시용).</p>';
     h += s.tracks.map(function (t, i) {
       return '<div class="trk"><input type="checkbox" data-mark="' + i + '"' + (t.mark ? ' checked' : '') + ' aria-label="반복 표시"><span class="n">' + (i + 1) + '</span><button type="button" class="nm" data-act="play-set" data-id="' + s.id + '" data-i="' + i + '">' + esc(t.name) + '</button>' + (t.text ? '<span class="tag">자막</span>' : '') + (have[t.fid] ? '' : '<span class="mx">mp3 안 열림</span>') + '<small class="num">' + fmt(segLen(t)) + '</small>' +
@@ -732,7 +786,7 @@
     else if (a === 'open-set') { viewSet = id; tab = 'lib'; render(); window.scrollTo(0, 0); }
     else if (a === 'back-lib') { viewSet = ''; render(); }
     else if (a === 'play-set') { startSet(id, +t.dataset.i); }
-    else if (a === 'open-subs') { var sinp = document.createElement('input'); sinp.type = 'file'; sinp.multiple = true; sinp.accept = '.smi,.sami,.srt,.vtt,.lrc,.txt'; sinp.onchange = function () { applySubs(sinp.files, setById(id)); }; sinp.click(); }
+    else if (a === 'open-subs') { var sinp = document.createElement('input'); sinp.type = 'file'; sinp.multiple = true; sinp.accept = '.smi,.sami,.srt,.vtt,.lrc,.txt,audio/*,.mp3'; sinp.onchange = function () { applySubs(sinp.files, setById(id)); }; sinp.click(); }
     else if (a === 'fav') { var s = setById(id); if (s) { s.fav = !s.fav; commit(); } }
     else if (a === 'rename') openSheet({ type: 'rename', id: id });
     else if (a === 'relink') { var rs = setById(id); if (rs) askOpen(rs, rs.last); }
